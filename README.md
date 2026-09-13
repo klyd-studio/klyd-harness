@@ -1,12 +1,12 @@
-ï»¿<div align="center">
-  <img src="https://raw.githubusercontent.com/kaadipranav/kaadipranav/refs/heads/main/assets/klydnewposter.png" width="380" />
+<div align="center">
+  <img src="assets/banner.jpg" width="380" />
 </div>
 
 # klyd
 
 A decision memory harness for terminal coding agents. It installs Git hooks that extract architectural decisions from commits via LLM call, stores them locally in SQLite, and injects the relevant decisions into an agent's context window at the next write.
 
-[PyPI: klyd](https://pypi.org/project/klyd/) Â· [GitHub](https://github.com/klyd-studio/klyd-harness) Â· [License: MIT](./LICENSE)
+[PyPI: klyd](https://pypi.org/project/klyd/) · [GitHub](https://github.com/klyd-studio/klyd-harness) · [License: MIT](./LICENSE)
 
 ---
 
@@ -19,7 +19,7 @@ Terminal coding agents fail in a predictable loop when working on a codebase ove
 3. Decisions made in session 1 (e.g., "use SQLite, not an ORM", "all auth must go through `verify_token`") are invisible in session 2.
 4. The agent makes a contradictory decision. The codebase accumulates conflicting patterns.
 
-This is a memory and context problem, not a model quality problem. The agent is not bad at coding â€” it does not know what decisions the project has already made.
+This is a memory and context problem, not a model quality problem. The agent is not bad at coding — it does not know what decisions the project has already made.
 
 ---
 
@@ -56,12 +56,12 @@ All state is local. There is no cloud dependency, no background process, and no 
 ## What I built
 
 **Core extraction and injection loop** (`klyd/cli.py`, `klyd/extractor.py`, `klyd/db.py`):
-- `kl extract-commit` â€” calls `git diff HEAD~1 HEAD` and the commit message, sends both to the configured LLM, and classifies the output into `NEW`, `REINFORCE`, or `CONTRADICT` events.
-- `kl prepare-injection` â€” retrieves staged file names via `git diff --cached --name-only`, queries the database for relevant decisions, and writes the injection file.
-- `kl review` â€” interactive terminal UI for resolving `CONTRADICT` flags, with options to accept, reject, edit, or merge (merge triggers a second LLM call to negotiate a unified rule).
-- `kl run <agent>` â€” wraps agent execution, passing the injection file as a context argument.
+- `kl extract-commit` — calls `git diff HEAD~1 HEAD` and the commit message, sends both to the configured LLM, and classifies the output into `NEW`, `REINFORCE`, or `CONTRADICT` events.
+- `kl prepare-injection` — retrieves staged file names via `git diff --cached --name-only`, queries the database for relevant decisions, and writes the injection file.
+- `kl review` — interactive terminal UI for resolving `CONTRADICT` flags, with options to accept, reject, edit, or merge (merge triggers a second LLM call to negotiate a unified rule).
+- `kl run <agent>` — wraps agent execution, passing the injection file as a context argument.
 
-**Multi-provider BYOK support**: Anthropic, OpenAI, OpenRouter, Google Gemini, Groq â€” configured via `kl config`.
+**Multi-provider BYOK support**: Anthropic, OpenAI, OpenRouter, Google Gemini, Groq — configured via `kl config`.
 
 ---
 
@@ -86,7 +86,7 @@ def _match_any_file(file_patterns: str, file_list_str: str) -> int:
 conn.create_function("match_files", 2, _match_any_file)
 ```
 
-This makes `match_files` available as a SQL function inside the query planner. The full relevance ranking query â€” combining glob match score, cosine similarity of the embedding, and recency â€” runs as a single SQL statement without pulling rows into Python first. Source: [`klyd/db.py`](./klyd/db.py).
+This makes `match_files` available as a SQL function inside the query planner. The full relevance ranking query — combining glob match score, cosine similarity of the embedding, and recency — runs as a single SQL statement without pulling rows into Python first. Source: [`klyd/db.py`](./klyd/db.py).
 
 ### Decision lineage with recursive CTEs
 
