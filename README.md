@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="assets/banner.jpg" width="480" />
+  <img src="https://raw.githubusercontent.com/kaadipranav/kaadipranav/refs/heads/main/assets/klydnewposter.png" />
 </div>
 
 # KLYD
