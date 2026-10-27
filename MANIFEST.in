@@ -1,5 +1,4 @@
-include hooks/*.sh
-include schema/*.sql
-include AGENTS.md
 include README.md
 include LICENSE
+include klyd/hook_templates/*.sh
+include klyd/schema/*.sql

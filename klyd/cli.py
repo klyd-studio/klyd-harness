@@ -1,6 +1,7 @@
 import click
 import subprocess
 import json
+import os
 import traceback
 import urllib.request
 from .hooks import install_hooks
@@ -30,10 +31,46 @@ class KlydGroup(click.Group):
         console.print()
         super().format_help(ctx, formatter)
 
+
+def _find_klyd_root(start=None):
+    """Return the nearest ancestor (or cwd) containing an initialised .klyd.
+
+    The marker is `memory.db`, not the directory: importing the logger used to
+    create a stray `.klyd/` in whatever directory you happened to be in, so an
+    empty directory is not evidence of a project.
+    """
+    current = Path(start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / '.klyd' / 'memory.db').exists():
+            return candidate
+    return None
+
+
+def _find_git_root(start=None):
+    """Return the git worktree root, or None if this is not a repository."""
+    try:
+        out = subprocess.check_output(
+            ['git', 'rev-parse', '--show-toplevel'],
+            cwd=str(start or Path.cwd()),
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return Path(out) if out else None
+
+
 @click.group(cls=KlydGroup)
-def cli():
+@click.pass_context
+def cli(ctx):
     """klyd: a CLI tool that wraps coding agents via git hooks to inject architectural memory."""
-    pass
+    # Every command resolves `.klyd/...` relative to the working directory. A
+    # developer is usually in a subdirectory, not the repo root, so enter the
+    # project root first. Without this, `kl status` reported "not initialized"
+    # from any nested directory and `prepare-injection` silently did nothing.
+    root = _find_klyd_root()
+    if root is not None and Path.cwd().resolve() != root:
+        os.chdir(root)
 
 def echo_brand(msg, bold=False):
     console.print(f"[cyan bold]klyd[/cyan bold] | {msg}")
@@ -123,23 +160,31 @@ Return ONLY the unified decision text, no explanation, no markdown, no JSON.
 # Diff display helper
 # ----------------------------------------------------------------------
 
-def _format_diff(old_text: str, new_text: str) -> str:
-    """Create a simple side-by-side diff representation."""
+def _format_diff(old_text: str, new_text: str):
+    """Build a side-by-side diff table.
+
+    Returning a renderable (rather than one pre-joined string) lets Rich divide
+    the width between the two sides and fold each line. The old implementation
+    padded both sides to 40 characters and joined them into a 83-character
+    line, which wrapped at an 80-column terminal and read as garbled output.
+    """
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(overflow="fold")
+    table.add_column(overflow="fold")
+
     old_lines = old_text.split('\n')
     new_lines = new_text.split('\n')
     max_len = max(len(old_lines), len(new_lines))
-    result_lines = []
+
+    table.add_row("[bold red]Old[/bold red]", "[bold green]New[/bold green]")
     for i in range(max_len):
         old_line = old_lines[i] if i < len(old_lines) else ''
         new_line = new_lines[i] if i < len(new_lines) else ''
-        # Truncate to 40 chars for side-by-side
-        old_trunc = old_line[:40] if len(old_line) > 40 else old_line.ljust(40)
-        new_trunc = new_line[:40] if len(new_line) > 40 else new_line.ljust(40)
         if old_line != new_line:
-            result_lines.append(f"[red]{old_trunc}[/red] | [green]{new_trunc}[/green]")
+            table.add_row(f"[red]{old_line}[/red]", f"[green]{new_line}[/green]")
         else:
-            result_lines.append(f"[dim]{old_trunc}[/dim] | [dim]{new_trunc}[/dim]")
-    return '\n'.join(result_lines)
+            table.add_row(f"[dim]{old_line}[/dim]", f"[dim]{new_line}[/dim]")
+    return table
 
 # ----------------------------------------------------------------------
 # Status helpers
@@ -173,7 +218,7 @@ def _build_module_tree(decisions, pinned_ids):
             conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
             id_str = str(d['id'])
             if d['id'] in pinned_ids:
-                id_str = f"📌 {id_str}"
+                id_str = f"* {id_str}"
             decision_text = d['decision'][:60] + '...' if len(d['decision']) > 60 else d['decision']
             mod_node.add(f"[{conf_color}]{id_str}: {decision_text}[/{conf_color}]")
     return tree
@@ -243,6 +288,16 @@ def _export_status(active, flagged, stats, format_type):
 @cli.command()
 def init():
     """Initialize klyd in the current git repository."""
+    # `kl init` installs hooks in `.git/hooks` and writes `.klyd/`, both
+    # relative to the working directory. Resolve the worktree root so running
+    # it from a subdirectory initialises the repository, not the subdirectory.
+    git_root = _find_git_root()
+    if git_root is None:
+        console.print("[bold red]Not a git repository.[/bold red] Run `kl init` inside a git repo.")
+        raise click.exceptions.Exit(1)
+    if Path.cwd().resolve() != git_root:
+        os.chdir(git_root)
+
     logger.info("Initializing klyd")
     console.print()
     console.print(r"[green bold]888  /         888           Y88b    /       888~-_   [/green bold]")
@@ -301,8 +356,12 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
             table.add_row("[dim]No configuration set[/dim]", "[dim]Run: kl config --api-key ...[/dim]")
         else:
             for k, v in cfg.items():
-                if 'key' in k and v:
+                if 'key' in k and isinstance(v, str) and v:
                     v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
+                elif not isinstance(v, str):
+                    # Lists (pinned_decision_ids, module_filter) and None are not
+                    # renderables; str() them so --show works with default config.
+                    v = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
                 table.add_row(k, v)
         console.print(table)
         return
@@ -350,6 +409,27 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
     else:
         console.print("[yellow]Usage:[/yellow] kl config --api-key ... --openai-key ... --model ... --injection-template ... --strict-mode ... --max-decisions ... --min-confidence ... --module-filter ...\nOr use --show to display current configuration.")
 
+def _agent_command(cmd, injection_path, injection_text):
+    """Return the agent argv with klyd's injection wired in.
+
+    Aider reads a file through ``--message-file``. OpenCode takes its prompt as
+    a positional argument to the ``run`` subcommand -- ``-m`` selects the
+    *model*, so the previous ``extend(['-m', injection])`` told OpenCode to use
+    the entire injection text as a model name and never delivered the prompt.
+    """
+    argv = list(cmd)
+    agent = argv[0].lower()
+
+    if agent == 'aider':
+        argv.extend(['--message-file', str(injection_path)])
+    elif agent == 'opencode':
+        if 'run' not in argv[1:]:
+            argv.insert(1, 'run')
+        argv.append(injection_text)
+
+    return argv
+
+
 @cli.command(context_settings={"ignore_unknown_options": True})
 @click.option('--no-inject', is_flag=True, help='Skip generating injection file')
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
@@ -376,10 +456,11 @@ def run(no_inject, relevance_mode, cmd):
     agent_name = run_cmd[0].lower()
     
     if inj_path.exists() and inj_path.stat().st_size > 0:
-        if agent_name == 'aider':
-            run_cmd.extend(['--message-file', str(inj_path)])
-        elif agent_name == 'opencode':
-            run_cmd.extend(['-m', inj_path.read_text()])
+        # Read as UTF-8 explicitly: the default locale encoding on Windows is
+        # cp1252, so a decision containing non-ASCII text crashed `kl run`.
+        run_cmd = _agent_command(
+            run_cmd, inj_path, inj_path.read_text(encoding='utf-8')
+        )
             
     console.print(Panel(f"[bold cyan]Launching[/bold cyan] {agent_name}...", title="[bold blue]AGENT START[/bold blue]", border_style="blue", expand=False))
     
@@ -466,9 +547,13 @@ def extract_commit():
 
     except Exception as e:
         err_log = klyd_dir / 'errors.log'
-        with open(err_log, 'a') as f:
+        with open(err_log, 'a', encoding='utf-8') as f:
             f.write(f"Error extracting commit:\n{traceback.format_exc()}\n")
-        return
+        # Do not swallow this: without a message, a user with no API key sees
+        # only "ERROR: Extraction failed" and has no way to know why.
+        console.print(f"[bold red]Extraction failed:[/bold red] {e}")
+        console.print("[dim]Check `kl config --show`, then set a key with `kl config --api-key ...`.[/dim]")
+        raise click.exceptions.Exit(1)
 
 @cli.command()
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
@@ -588,12 +673,15 @@ def pin(decision_id):
     decision = get_decision_by_id(str(db_path), decision_id)
     if not decision:
         console.print(f"[red]Decision with id {decision_id} not found.[/red]")
-        return
-    
+        raise click.exceptions.Exit(1)
+
     add_pinned_decision_id(decision_id)
     logger.info("Pinned decision", extra={'decision_id': decision_id})
+    text = decision['decision']
+    if len(text) > 60:
+        text = text[:60] + "..."
     console.print(Panel(
-        f"[bold green]Pinned decision {decision_id}:[/bold green] {decision['decision'][:60]}...",
+        f"[bold green]Pinned decision {decision_id}:[/bold green] {text}",
         border_style="green", expand=False
     ))
 
@@ -834,12 +922,11 @@ def status(search, tree, format_type, stats):
     # Handle export formats
     if format_type in ('markdown', 'html', 'json'):
         export_text = _export_status(active, flagged, stats_data, format_type)
-        if format_type == 'markdown':
-            console.print(Markdown(export_text))
-        elif format_type == 'html':
-            console.print(export_text)
-        elif format_type == 'json':
-            console.print(export_text)
+        # These formats are consumed by machines or pasted into files, so they
+        # must pass through byte-for-byte: Rich would word-wrap long lines (which
+        # puts literal newlines inside JSON string values and makes the output
+        # unparseable) and interpret HTML/markdown as console markup.
+        console.print(export_text, soft_wrap=True, markup=False, highlight=False)
         return
 
     # If --tree flag is set, show tree view
@@ -848,61 +935,73 @@ def status(search, tree, format_type, stats):
         console.print(tree_view)
         return
 
-    # Default table view
-    table = Table(box=rich.box.SIMPLE, header_style="bold cyan", show_edge=False, padding=(0, 2))
-    table.add_column("ID", style="dim", max_width=8)
-    table.add_column("Decision", style="white")
-    table.add_column("Module", style="bold blue")
-    table.add_column("Confidence")
-    table.add_column("Event")
-    table.add_column("Reinforcements", justify="right")
-
-    for d in active:
-        conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
-        conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
-        
-        event_color = "bright_blue" if d.get('event_type') == 'NEW' else ("bright_magenta" if d.get('event_type') == 'REINFORCE' else "bold bright_red")
-        event_styled = f"[{event_color}]{d.get('event_type', 'NEW')}[/{event_color}]"
-        
-        id_str = str(d['id'])
-        if d['id'] in pinned_ids:
-            id_str = f"[bold yellow]📌 {id_str}[/bold yellow]"
-        
-        table.add_row(
-            id_str,
-            d['decision'],
-            d['module'],
-            conf_styled,
-            event_styled,
-            f"x{d['reinforcement_count']}"
-        )
-    
     if not active:
-        table.add_row("", "[dim]No active architectural decisions stored yet.[/dim]", "", "", "", "")
+        # Do not put the empty state inside the table: with six columns and one
+        # long cell, Rich squeezes the Decision column and wraps the sentence
+        # character by character. This is the first screen a new user sees.
+        console.print(
+            Panel(
+                "[dim]No active architectural decisions stored yet.\n"
+                "Make a commit, then run `kl extract-commit`, or `kl review`.[/dim]",
+                title="[bold cyan] Architectural Memory [/bold cyan]",
+                border_style="cyan",
+                expand=False,
+                padding=(1, 2),
+            )
+        )
+    else:
+        # Six side-by-side columns do not fit in an 80-column terminal: Rich
+        # squeezes every column to its minimum, which truncates headers
+        # ("Reinforc...") and wraps the decision text one word per line. Lay
+        # each decision out as a block instead -- a short metadata line above
+        # the decision -- so the text has the full panel width and stays
+        # readable at any terminal size.
+        body = Table.grid(padding=(0, 1), expand=False)
+        body.add_column(no_wrap=True, width=4, style="dim", justify="right")
+        body.add_column(overflow="fold")
 
-    console.print(Panel(table, title="[bold cyan] Architectural Memory [/bold cyan]", border_style="cyan", expand=False, padding=(1, 2)))
+        for index, d in enumerate(active):
+            if index:
+                body.add_row("", "")
+
+            conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
+            conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
+
+            event_color = "bright_blue" if d.get('event_type') == 'NEW' else ("bright_magenta" if d.get('event_type') == 'REINFORCE' else "bold bright_red")
+            event_styled = f"[{event_color}]{d.get('event_type', 'NEW')}[/{event_color}]"
+
+            marker = "[bold yellow]*[/bold yellow] " if d['id'] in pinned_ids else ""
+            meta = (
+                f"[bold blue]{d['module']}[/bold blue]  "
+                f"{conf_styled}  {event_styled}  "
+                f"[dim]x{d['reinforcement_count']}[/dim]"
+            )
+
+            body.add_row(f"{marker}[dim]#{d['id']}[/dim]", meta)
+            body.add_row("", Text(d['decision'], style="white"))
+
+        console.print(Panel(body, title="[bold cyan] Architectural Memory [/bold cyan]", border_style="cyan", expand=False, padding=(1, 2)))
 
     if flagged:
         console.print()
-        flagged_table = Table(box=rich.box.SIMPLE, show_edge=False, padding=(0, 2))
-        flagged_table.add_column("ID", style="dim", max_width=8)
-        flagged_table.add_column("Decision", style="bold white")
-        flagged_table.add_column("Module", style="bold blue")
-        flagged_table.add_column("Confidence")
-        
-        for d in flagged:
+        flagged_body = Table.grid(padding=(0, 1), expand=False)
+        flagged_body.add_column(no_wrap=True, width=4, style="dim", justify="right")
+        flagged_body.add_column(overflow="fold")
+
+        for index, d in enumerate(flagged):
+            if index:
+                flagged_body.add_row("", "")
             conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
             conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
-            
-            flagged_table.add_row(
-                str(d['id'])[:8],
-                d['decision'],
-                d['module'],
-                conf_styled
+
+            flagged_body.add_row(
+                f"[dim]#{d['id']}[/dim]",
+                f"[bold blue]{d['module']}[/bold blue]  {conf_styled}",
             )
+            flagged_body.add_row("", Text(d['decision'], style="bold white"))
 
         warning_panel = Panel(
-            flagged_table,
+            flagged_body,
             title="[bold white on red] NEEDS REVIEW - CONFLICTS DETECTED [/bold white on red]",
             border_style="red",
             expand=False,
@@ -927,7 +1026,7 @@ def metrics():
     summary = get_metrics_summary(str(db_path))
 
     panel = Panel(
-        f"[bold]Decision count:[/bold] {summary['decision_count']}\n"
+        f"[bold]Decision count:[/bold] {int(summary['decision_count'])}\n"
         f"[bold]Average confidence:[/bold] {summary['avg_confidence']:.2f} (0=LOW, 1=MEDIUM, 2=HIGH)\n"
         f"[bold]Conflict rate:[/bold] {summary['conflict_rate']:.2%}",
         title="[bold cyan]klyd Metrics[/bold cyan]",
@@ -935,3 +1034,9 @@ def metrics():
         expand=False
     )
     console.print(panel)
+
+
+if __name__ == "__main__":
+    # Allows `python -m klyd.cli`, which is how the git hooks invoke klyd when
+    # no `kl` console script is reachable on PATH.
+    cli()

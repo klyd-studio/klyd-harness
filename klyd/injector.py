@@ -1,14 +1,33 @@
 import fnmatch
+import math
+import struct
 from .db import (
     compute_embedding,
     get_embedding_for_decision,
     get_reinforcement_recency_score,
-    _cosine_similarity
 )
 from .config import get_injection_template, get_pinned_decision_ids, get_max_decisions_inject, get_strict_mode, get_config
 from .logger import setup_logger
 
 logger = setup_logger(__name__)
+
+
+def _cosine_similarity(a: bytes, b: bytes) -> float:
+    """Cosine similarity between two float32 little-endian vectors.
+
+    The placeholder embedding is 128 zero bytes, so a zero norm is the normal
+    case today, not an edge case: return 0.0 instead of dividing by zero.
+    """
+    if not a or not b or len(a) != len(b) or len(a) % 4 != 0:
+        return 0.0
+    va = struct.unpack(f"<{len(a) // 4}f", a)
+    vb = struct.unpack(f"<{len(b) // 4}f", b)
+    dot = sum(x * y for x, y in zip(va, vb))
+    na = math.sqrt(sum(x * x for x in va))
+    nb = math.sqrt(sum(y * y for y in vb))
+    if na == 0.0 or nb == 0.0:
+        return 0.0
+    return dot / (na * nb)
 
 def _file_pattern_match(file_patterns: str, file_list: list[str]) -> float:
     """Return 1.0 if any file matches any pattern, else 0.0."""

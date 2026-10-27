@@ -9,7 +9,9 @@ from .logger import setup_logger
 logger = setup_logger(__name__)
 
 def get_schema_path():
-    return Path(__file__).resolve().parent.parent / 'schema' / 'v1.sql'
+    # Lives inside the package so it survives `pip install` (see pyproject
+    # package-data). The old repo-root layout only worked for `pip install -e`.
+    return Path(__file__).resolve().parent / 'schema' / 'v1.sql'
 
 def init_db(db_path):
     logger.info("Initializing database", extra={'db_path': db_path})
@@ -76,6 +78,49 @@ def compute_embedding(text: str) -> bytes:
     """Compute embedding for a decision text.
     Currently returns a dummy embedding; override with real model."""
     return _compute_dummy_embedding(text)
+
+
+def get_embedding_for_decision(db_path: str, decision_id: int):
+    """Return the stored embedding blob for a decision, or None.
+
+    injector.py scores semantic similarity against this; the column is currently
+    populated with the dummy vector from compute_embedding(), so the semantic
+    term is inert until a real model replaces it. Returning None (rather than a
+    zero vector) keeps that distinction visible to the caller.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT embedding FROM decisions WHERE id = ?", (decision_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or row[0] is None:
+        return None
+    return row[0]
+
+
+def get_reinforcement_recency_score(db_path: str, decision_id: int, half_life_days: float = 30.0) -> float:
+    """Return a 0..1 recency score for a decision.
+
+    Decays with the time since it was last reinforced, halving every
+    `half_life_days`. A decision touched today scores 1.0; one untouched for a
+    year scores ~0.0002. Unknown timestamps score 0.0 rather than a default,
+    so a missing row cannot outrank a fresh one.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT (julianday('now') - julianday(COALESCE(last_reinforced_at, created_at))) "
+            "FROM decisions WHERE id = ?",
+            (decision_id,),
+        ).fetchone()
+    finally:
+        conn.close()
+    if not row or row[0] is None:
+        return 0.0
+    age_days = max(0.0, float(row[0]))
+    return 0.5 ** (age_days / half_life_days)
 
 def store_decision(db_path, decision_dict):
     logger.debug("Storing decision", extra={'decision': decision_dict.get('decision', '')[:60]})
@@ -251,7 +296,10 @@ def get_flagged_decisions(db_path):
     return res
 
 def get_active_decisions_by_module(db_path, module):
-    logger.debug("Getting active decisions by module", extra={'module': module})
+    # 'module' is reserved on logging.LogRecord (it is the source module name),
+    # so passing extra={'module': ...} raises KeyError and killed `kl review`
+    # before it printed a single conflict.
+    logger.debug("Getting active decisions by module", extra={'decision_module': module})
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     cur = conn.cursor()

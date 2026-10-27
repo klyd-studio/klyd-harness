@@ -157,5 +157,8 @@ Existing architectural invariants (do not violate unless explicitly instructed):
         return normalized
 
     except Exception as e:
-        logger.error("Extraction failed", extra={'error': str(e)})
+        # Put the reason in the message: the stderr handler only prints the
+        # message, so `extra={'error': ...}` meant the user saw "Extraction
+        # failed" with no cause at all.
+        logger.error(f"Extraction failed: {e}", extra={'error': str(e)})
         raise

@@ -21,4 +21,32 @@ jobs:
         pip install . pytest
     - name: Run tests
       run: |
-        pytest test_db.py
+        pytest -q
+
+  wheel-check:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - name: Build wheel
+      run: |
+        python -m pip install --upgrade pip
+        pip install build
+        python -m build --wheel
+    - name: Verify templates are inside the wheel
+      # Installs the built wheel into a clean venv and asserts the files that
+      # `kl init` needs were actually packaged. This is the check that would
+      # have caught the 0.2.2 packaging bug before release.
+      run: |
+        python -m venv /tmp/verify
+        /tmp/verify/bin/pip install dist/*.whl
+        /tmp/verify/bin/python - <<'PY'
+        from klyd.db import get_schema_path
+        from klyd.hooks import get_template_path
+        for path in (get_schema_path(), get_template_path("post-commit"), get_template_path("pre-commit")):
+            assert path.is_file(), f"not packaged: {path}"
+        print("wheel contains schema and hook templates")
+        PY
