@@ -1,2 +1,2 @@
 #!/bin/sh
-{{KLYD}} prepare-injection >> .klyd/errors.log 2>&1 || true
+{{KLYD}} prepare-injection > /dev/null 2>> .klyd/errors.log || true

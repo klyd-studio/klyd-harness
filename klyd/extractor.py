@@ -75,9 +75,24 @@ Existing architectural invariants (do not violate unless explicitly instructed):
     try:
         # Determine provider
         is_anthropic_model = model.startswith('claude-') or model.startswith('anthropic/')
-        
+
+        api_base = config_data.get('api_base')
+        if api_base:
+            # Point the OpenAI-compatible client at any gateway -- a
+            # self-hosted proxy, LiteLLM, Ollama, or a local stub in tests.
+            # Without this the provider URLs are hardcoded, which makes the
+            # extraction path impossible to exercise without a paid key.
+            key = (
+                config_data.get('openai_key')
+                or config_data.get('openrouter_key')
+                or config_data.get('api_key')
+                or 'not-needed'
+            )
+            url = api_base.rstrip('/') + '/chat/completions'
+            content = _call_openai_compatible(url, key, model, prompt)
+            logger.debug("API base override used", extra={'api_base': api_base})
         # Direct Anthropic API if we have api_key and no other keys
-        if is_anthropic_model and 'api_key' in config_data and not any(k in config_data for k in ['openai_key', 'openrouter_key', 'gemini_key', 'groq_key']):
+        elif is_anthropic_model and 'api_key' in config_data and not any(k in config_data for k in ['openai_key', 'openrouter_key', 'gemini_key', 'groq_key']):
             client = Anthropic(api_key=config_data['api_key'])
             # Strip anthropic/ prefix if present
             actual_model = model.replace('anthropic/', '')

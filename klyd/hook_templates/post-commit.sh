@@ -1,2 +1,2 @@
 #!/bin/sh
-{{KLYD}} extract-commit >> .klyd/errors.log 2>&1 &
+{{KLYD}} extract-commit > /dev/null 2>> .klyd/errors.log &

@@ -2,8 +2,10 @@ import click
 import subprocess
 import json
 import os
+import sys
 import traceback
 import urllib.request
+from contextlib import contextmanager
 from .hooks import install_hooks
 from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject, get_min_confidence, set_min_confidence, get_module_filter, set_module_filter
 from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions, update_metrics, get_metrics_summary
@@ -24,7 +26,46 @@ import io
 import datetime
 
 logger = setup_logger(__name__)
+
+
+def _force_utf8_streams():
+    """Make redirected output survive on Windows.
+
+    The git hooks redirect klyd's output to `.klyd/errors.log`. On Windows the
+    default encoding for a redirected stream is cp1252, so the spinner glyphs
+    raised UnicodeEncodeError and the hook wrote a traceback to a file named
+    "errors" on every clean commit. Reconfiguring only applies to real streams;
+    pytest's capture objects do not have reconfigure().
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_streams()
 console = Console()
+
+
+@contextmanager
+def _status(message):
+    """Show a spinner only when a human can see it.
+
+    Rich's Live renderer writes control sequences and spinner glyphs even when
+    stdout is redirected, which is how the git hook ended up writing a
+    traceback into `.klyd/errors.log`. When the output is not a terminal there
+    is nobody to show a spinner to, so skip it entirely.
+    """
+    if console.is_terminal:
+        with console.status(message, spinner="dots12"):
+            yield
+    else:
+        yield
+
 
 class KlydGroup(click.Group):
     def format_help(self, ctx, formatter):
@@ -223,13 +264,31 @@ def _build_module_tree(decisions, pinned_ids):
             mod_node.add(f"[{conf_color}]{id_str}: {decision_text}[/{conf_color}]")
     return tree
 
+
+def _json_safe_decisions(decisions):
+    """Replace binary columns with null so the export is serialisable.
+
+    `embedding` is a BLOB. It is used for ranking and is meaningless in a
+    status export, but json.dumps refuses bytes -- so `kl status --format json`
+    crashed as soon as a decision written by extraction had an embedding.
+    Seeded rows have NULL embeddings, which is why the earlier tests missed it.
+    """
+    return [
+        {
+            key: (None if isinstance(value, (bytes, bytearray, memoryview)) else value)
+            for key, value in decision.items()
+        }
+        for decision in decisions
+    ]
+
+
 def _export_status(active, flagged, stats, format_type):
     """Export status in the requested format."""
     if format_type == 'json':
         data = {
             'stats': stats,
-            'active_decisions': active,
-            'flagged_decisions': flagged
+            'active_decisions': _json_safe_decisions(active),
+            'flagged_decisions': _json_safe_decisions(flagged)
         }
         return json.dumps(data, indent=2)
     elif format_type == 'markdown':
@@ -311,7 +370,7 @@ def init():
     console.print()
     console.print()
     try:
-        with console.status("[bold cyan]Creating .klyd directory, database, and hooks...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Creating .klyd directory, database, and hooks...[/bold cyan]"):
             install_hooks()
             init_config()
             klyd_dir = Path('.klyd')
@@ -339,13 +398,14 @@ def init():
 @click.option('--gemini-key', help='Gemini API key')
 @click.option('--groq-key', help='Groq API key')
 @click.option('--model', help='Model to use (default: claude-sonnet-4-6)')
+@click.option('--api-base', help='OpenAI-compatible base URL to use instead of the built-in provider endpoints (e.g. a local gateway)')
 @click.option('--show', is_flag=True, help='Show current configuration')
 @click.option('--injection-template', help='Custom injection template with {decisions} placeholder')
 @click.option('--strict-mode', type=bool, help='Enable strict mode (only file-matched decisions)')
 @click.option('--max-decisions', type=int, help='Maximum number of decisions to inject')
 @click.option('--min-confidence', type=click.Choice(['LOW', 'MEDIUM', 'HIGH']), help='Minimum confidence level to include')
 @click.option('--module-filter', help='Comma-separated list of modules to include')
-def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, show, injection_template, strict_mode, max_decisions, min_confidence, module_filter):
+def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, api_base, show, injection_template, strict_mode, max_decisions, min_confidence, module_filter):
     """Set klyd configuration."""
     if show:
         cfg = get_all_config()
@@ -367,7 +427,7 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
         return
 
     changes = False
-    with console.status("[bold cyan]Saving configuration...[/bold cyan]", spinner="dots12"):
+    with _status("[bold cyan]Saving configuration...[/bold cyan]"):
         if api_key:
             set_config('api_key', api_key)
             changes = True
@@ -385,6 +445,9 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
             changes = True
         if model:
             set_config('model', model)
+            changes = True
+        if api_base:
+            set_config('api_base', api_base)
             changes = True
         if injection_template is not None:
             set_injection_template(injection_template)
@@ -444,7 +507,7 @@ def run(no_inject, relevance_mode, cmd):
     inj_path = klyd_dir / 'injection.txt'
     
     if not no_inject:
-        with console.status("[bold cyan]Preparing injection context...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Preparing injection context...[/bold cyan]"):
             try:
                 ctx = click.get_current_context()
                 # Pass relevance_mode to prepare_injection
@@ -496,10 +559,10 @@ def extract_commit():
         return
 
     try:
-        with console.status("[bold cyan]Extracting architectural decisions via LLM...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Extracting architectural decisions via LLM...[/bold cyan]"):
             db_path = str(klyd_dir / 'memory.db')
             existing = get_decisions_for_files(db_path, files, top_k=20)
-            existing_json = json.dumps(existing, indent=2)
+            existing_json = json.dumps(_json_safe_decisions(existing), indent=2)
 
             config_data = get_all_config()
             model = config_data.get('model', 'claude-sonnet-4-6')
@@ -570,7 +633,7 @@ def prepare_injection(relevance_mode, min_confidence, module_filter, template):
         return
         
     try:
-        with console.status("[bold cyan]Preparing injection context...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Preparing injection context...[/bold cyan]"):
             files_out = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True)
             files = [f for f in files_out.strip().split('\n') if f]
             
@@ -626,7 +689,7 @@ def preview_injection(relevance_mode, min_confidence, module_filter, template):
         return
         
     try:
-        with console.status("[bold cyan]Generating preview...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Generating preview...[/bold cyan]"):
             files_out = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True)
             files = [f for f in files_out.strip().split('\n') if f]
             
@@ -781,7 +844,7 @@ def review():
                 break
             elif choice == 'a':
                 # Accept+Merge: call LLM to suggest unified decision
-                with console.status("[bold cyan]Asking LLM to suggest a merge...[/bold cyan]", spinner="dots12"):
+                with _status("[bold cyan]Asking LLM to suggest a merge...[/bold cyan]"):
                     merged_text = _call_llm_for_merge(old_decision_text, d['decision'], config_data)
                 if merged_text:
                     console.print(Panel(
