@@ -46,6 +46,8 @@ ls .git/hooks/post-commit      # show the absolute launcher, not a bare `kl`
 # 3. configure the provider once
 kl config --openrouter-key sk-or-... --model anthropic/claude-sonnet-4-6
 kl config --show               # key is masked
+# If the provider rejects the model name, set --model to one your account can
+# access. The extraction prompt does not depend on a specific model.
 
 # 4. a commit with an architectural decision in it
 mkdir -p worker/src/lib
