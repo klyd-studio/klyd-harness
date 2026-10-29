@@ -15,8 +15,13 @@ shipping code path either way.
 
 ## Prerequisites
 
+0.2.3 is not on PyPI yet. The published 0.2.2 wheel is missing the hook
+templates and schema, so do not use `pip install klyd` for the demo.
+
 ```sh
-pip install klyd          # or: pip install -e .
+git clone -b fix/clean-install-audit https://github.com/klyd-studio/klyd-harness
+cd klyd-harness
+pip install .          # or: pip install -e .
 git --version
 ```
 
