@@ -49,6 +49,8 @@ kl config --openrouter-key sk-or-... --model anthropic/claude-sonnet-4-6
 kl config --show               # key is masked
 # If the provider rejects the model name, set --model to one your account can
 # access. The extraction prompt does not depend on a specific model.
+# On a free-tier key with no credit, use: --model openrouter/free
+# That router picked cohere/north-mini-code:free for the verification run.
 
 # 4. a commit with an architectural decision in it
 mkdir -p worker/src/lib
@@ -124,9 +126,17 @@ recording*. The rest of the run is real.
 - `kl extract-commit` exits 1 and prints the reason when there is no key.
 - `kl review` reaches its prompt instead of crashing on a logging key.
 
-## The one thing that is still not proven
+## What is proven, and what is not
 
-The real provider call. The pipeline is tested end-to-end against a local
-OpenAI-compatible server (`test_extraction_pipeline.py`), but no test in this
-repository has ever talked to Anthropic or OpenRouter with a real key. Run the
-live demo once before you film it.
+**Proven on 2026-10-31 with a real free-tier OpenRouter key.** `openrouter/free`
+routed to `cohere/north-mini-code:free`. The full loop ran on the network: commit
+→ hook → provider → SQLite → `kl status` → valid JSON → `.klyd/injection.txt`.
+The second commit was clean (`errors.log` 0 bytes). A deliberately contradicting
+commit was flagged, and `kl review` option `a` produced a real LLM merge that was
+accepted. The transcript is in the audit write-up (`05-cli-audit.md`).
+
+**Not proven:** the specific paid model `anthropic/claude-sonnet-4-6`. The test
+key had $0 credit, so a paid call would 402. The wire path is the same; the model
+name is the only difference. If your key has credit, run the live demo once with
+the model you intend to film. `kl run` with a real `aider` or `opencode` binary is
+also still unexercised.
