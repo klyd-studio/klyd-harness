@@ -29,12 +29,15 @@ klyd: a CLI tool that wraps coding agents via git hooks to inject architectural 
 - Test file: `test_db.py` (no formal test suite yet)
 
 ## Database
-- Schema lives at `schema/v1.sql`
+- Schema lives at `klyd/schema/v1.sql`
 - db.py uses raw sqlite3, no ORM
 
 ## Testing
-- Test repo: `test_task09/` (2 commits: sqlite3 then click)
-- To test: checkout each commit and run `kl extract-commit`, then check `kl status`
+- `pytest -q` runs the unit tests plus `test_cli_e2e.py`, which drives the
+  installed CLI in throwaway git repositories (init, hooks, status, review,
+  exports). No network or API key required.
+- Manual extraction test: `test_task09/` (2 commits: sqlite3 then click).
+  Checkout each commit and run `kl extract-commit`, then check `kl status`.
 - Model: `openrouter/free` works; `anthropic/*` models need OpenRouter key
 
 ## Known issues (fixed but worth knowing)

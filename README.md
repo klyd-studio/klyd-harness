@@ -144,6 +144,18 @@ SELECT * FROM ancestors;
 
 ### 1. Install Klyd
 
+> **0.2.3 is not on PyPI yet.** The published 0.2.2 wheel is missing its hook
+> templates and SQL schema, so `pip install klyd` installs a CLI that cannot
+> initialise a repository. Until 0.2.3 ships, install from this branch:
+>
+> ```bash
+> git clone -b fix/clean-install-audit https://github.com/klyd-studio/klyd-harness
+> cd klyd-harness
+> pip install .
+> ```
+
+Once 0.2.3 is released:
+
 ```bash
 pip install klyd
 ```

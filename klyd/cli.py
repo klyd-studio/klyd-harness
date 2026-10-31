@@ -1,9 +1,12 @@
 import click
 import subprocess
 import json
+import os
+import sys
 import traceback
 import urllib.request
-from .hooks import install_hooks
+from contextlib import contextmanager
+from .hooks import install_hooks, ensure_gitignored
 from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject, get_min_confidence, set_min_confidence, get_module_filter, set_module_filter
 from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions, update_metrics, get_metrics_summary
 from .logger import setup_logger
@@ -23,17 +26,92 @@ import io
 import datetime
 
 logger = setup_logger(__name__)
+
+
+def _force_utf8_streams():
+    """Make redirected output survive on Windows.
+
+    The git hooks redirect klyd's output to `.klyd/errors.log`. On Windows the
+    default encoding for a redirected stream is cp1252, so the spinner glyphs
+    raised UnicodeEncodeError and the hook wrote a traceback to a file named
+    "errors" on every clean commit. Reconfiguring only applies to real streams;
+    pytest's capture objects do not have reconfigure().
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, 'reconfigure', None)
+        if reconfigure is None:
+            continue
+        try:
+            reconfigure(encoding='utf-8', errors='replace')
+        except (ValueError, OSError):
+            pass
+
+
+_force_utf8_streams()
 console = Console()
+
+
+@contextmanager
+def _status(message):
+    """Show a spinner only when a human can see it.
+
+    Rich's Live renderer writes control sequences and spinner glyphs even when
+    stdout is redirected, which is how the git hook ended up writing a
+    traceback into `.klyd/errors.log`. When the output is not a terminal there
+    is nobody to show a spinner to, so skip it entirely.
+    """
+    if console.is_terminal:
+        with console.status(message, spinner="dots12"):
+            yield
+    else:
+        yield
+
 
 class KlydGroup(click.Group):
     def format_help(self, ctx, formatter):
         console.print()
         super().format_help(ctx, formatter)
 
+
+def _find_klyd_root(start=None):
+    """Return the nearest ancestor (or cwd) containing an initialised .klyd.
+
+    The marker is `memory.db`, not the directory: importing the logger used to
+    create a stray `.klyd/` in whatever directory you happened to be in, so an
+    empty directory is not evidence of a project.
+    """
+    current = Path(start or Path.cwd()).resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / '.klyd' / 'memory.db').exists():
+            return candidate
+    return None
+
+
+def _find_git_root(start=None):
+    """Return the git worktree root, or None if this is not a repository."""
+    try:
+        out = subprocess.check_output(
+            ['git', 'rev-parse', '--show-toplevel'],
+            cwd=str(start or Path.cwd()),
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return None
+    return Path(out) if out else None
+
+
 @click.group(cls=KlydGroup)
-def cli():
+@click.pass_context
+def cli(ctx):
     """klyd: a CLI tool that wraps coding agents via git hooks to inject architectural memory."""
-    pass
+    # Every command resolves `.klyd/...` relative to the working directory. A
+    # developer is usually in a subdirectory, not the repo root, so enter the
+    # project root first. Without this, `kl status` reported "not initialized"
+    # from any nested directory and `prepare-injection` silently did nothing.
+    root = _find_klyd_root()
+    if root is not None and Path.cwd().resolve() != root:
+        os.chdir(root)
 
 def echo_brand(msg, bold=False):
     console.print(f"[cyan bold]klyd[/cyan bold] | {msg}")
@@ -123,23 +201,31 @@ Return ONLY the unified decision text, no explanation, no markdown, no JSON.
 # Diff display helper
 # ----------------------------------------------------------------------
 
-def _format_diff(old_text: str, new_text: str) -> str:
-    """Create a simple side-by-side diff representation."""
+def _format_diff(old_text: str, new_text: str):
+    """Build a side-by-side diff table.
+
+    Returning a renderable (rather than one pre-joined string) lets Rich divide
+    the width between the two sides and fold each line. The old implementation
+    padded both sides to 40 characters and joined them into a 83-character
+    line, which wrapped at an 80-column terminal and read as garbled output.
+    """
+    table = Table.grid(padding=(0, 1), expand=True)
+    table.add_column(overflow="fold")
+    table.add_column(overflow="fold")
+
     old_lines = old_text.split('\n')
     new_lines = new_text.split('\n')
     max_len = max(len(old_lines), len(new_lines))
-    result_lines = []
+
+    table.add_row("[bold red]Old[/bold red]", "[bold green]New[/bold green]")
     for i in range(max_len):
         old_line = old_lines[i] if i < len(old_lines) else ''
         new_line = new_lines[i] if i < len(new_lines) else ''
-        # Truncate to 40 chars for side-by-side
-        old_trunc = old_line[:40] if len(old_line) > 40 else old_line.ljust(40)
-        new_trunc = new_line[:40] if len(new_line) > 40 else new_line.ljust(40)
         if old_line != new_line:
-            result_lines.append(f"[red]{old_trunc}[/red] | [green]{new_trunc}[/green]")
+            table.add_row(f"[red]{old_line}[/red]", f"[green]{new_line}[/green]")
         else:
-            result_lines.append(f"[dim]{old_trunc}[/dim] | [dim]{new_trunc}[/dim]")
-    return '\n'.join(result_lines)
+            table.add_row(f"[dim]{old_line}[/dim]", f"[dim]{new_line}[/dim]")
+    return table
 
 # ----------------------------------------------------------------------
 # Status helpers
@@ -173,18 +259,36 @@ def _build_module_tree(decisions, pinned_ids):
             conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
             id_str = str(d['id'])
             if d['id'] in pinned_ids:
-                id_str = f"📌 {id_str}"
+                id_str = f"* {id_str}"
             decision_text = d['decision'][:60] + '...' if len(d['decision']) > 60 else d['decision']
             mod_node.add(f"[{conf_color}]{id_str}: {decision_text}[/{conf_color}]")
     return tree
+
+
+def _json_safe_decisions(decisions):
+    """Replace binary columns with null so the export is serialisable.
+
+    `embedding` is a BLOB. It is used for ranking and is meaningless in a
+    status export, but json.dumps refuses bytes -- so `kl status --format json`
+    crashed as soon as a decision written by extraction had an embedding.
+    Seeded rows have NULL embeddings, which is why the earlier tests missed it.
+    """
+    return [
+        {
+            key: (None if isinstance(value, (bytes, bytearray, memoryview)) else value)
+            for key, value in decision.items()
+        }
+        for decision in decisions
+    ]
+
 
 def _export_status(active, flagged, stats, format_type):
     """Export status in the requested format."""
     if format_type == 'json':
         data = {
             'stats': stats,
-            'active_decisions': active,
-            'flagged_decisions': flagged
+            'active_decisions': _json_safe_decisions(active),
+            'flagged_decisions': _json_safe_decisions(flagged)
         }
         return json.dumps(data, indent=2)
     elif format_type == 'markdown':
@@ -243,6 +347,16 @@ def _export_status(active, flagged, stats, format_type):
 @cli.command()
 def init():
     """Initialize klyd in the current git repository."""
+    # `kl init` installs hooks in `.git/hooks` and writes `.klyd/`, both
+    # relative to the working directory. Resolve the worktree root so running
+    # it from a subdirectory initialises the repository, not the subdirectory.
+    git_root = _find_git_root()
+    if git_root is None:
+        console.print("[bold red]Not a git repository.[/bold red] Run `kl init` inside a git repo.")
+        raise click.exceptions.Exit(1)
+    if Path.cwd().resolve() != git_root:
+        os.chdir(git_root)
+
     logger.info("Initializing klyd")
     console.print()
     console.print(r"[green bold]888  /         888           Y88b    /       888~-_   [/green bold]")
@@ -256,8 +370,9 @@ def init():
     console.print()
     console.print()
     try:
-        with console.status("[bold cyan]Creating .klyd directory, database, and hooks...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Creating .klyd directory, database, and hooks...[/bold cyan]"):
             install_hooks()
+            ensure_gitignored()
             init_config()
             klyd_dir = Path('.klyd')
             db_path = klyd_dir / 'memory.db'
@@ -269,7 +384,7 @@ def init():
             update_metrics(str(db_path))
             
         console.print(Panel(
-            "Klyd harness initialised in [cyan].klyd[/cyan]\n\n[dim]Installed git hooks for automatic extraction.[/dim]\n[dim]Errors are logged to .klyd/errors.log[/dim]",
+            "Klyd harness initialised in [cyan].klyd[/cyan]\n\n[dim]Installed git hooks for automatic extraction.[/dim]\n[dim]Local state is ignored by git (.klyd/)[/dim]\n[dim]Errors are logged to .klyd/errors.log[/dim]",
             title="[bold green]SUCCESS[/bold green]", border_style="green", padding=(1, 2)
         ))
     except Exception as e:
@@ -284,13 +399,14 @@ def init():
 @click.option('--gemini-key', help='Gemini API key')
 @click.option('--groq-key', help='Groq API key')
 @click.option('--model', help='Model to use (default: claude-sonnet-4-6)')
+@click.option('--api-base', help='OpenAI-compatible base URL to use instead of the built-in provider endpoints (e.g. a local gateway)')
 @click.option('--show', is_flag=True, help='Show current configuration')
 @click.option('--injection-template', help='Custom injection template with {decisions} placeholder')
 @click.option('--strict-mode', type=bool, help='Enable strict mode (only file-matched decisions)')
 @click.option('--max-decisions', type=int, help='Maximum number of decisions to inject')
 @click.option('--min-confidence', type=click.Choice(['LOW', 'MEDIUM', 'HIGH']), help='Minimum confidence level to include')
 @click.option('--module-filter', help='Comma-separated list of modules to include')
-def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, show, injection_template, strict_mode, max_decisions, min_confidence, module_filter):
+def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, api_base, show, injection_template, strict_mode, max_decisions, min_confidence, module_filter):
     """Set klyd configuration."""
     if show:
         cfg = get_all_config()
@@ -301,14 +417,18 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
             table.add_row("[dim]No configuration set[/dim]", "[dim]Run: kl config --api-key ...[/dim]")
         else:
             for k, v in cfg.items():
-                if 'key' in k and v:
+                if 'key' in k and isinstance(v, str) and v:
                     v = v[:4] + '*' * (len(v) - 8) + v[-4:] if len(v) > 8 else '*' * len(v)
+                elif not isinstance(v, str):
+                    # Lists (pinned_decision_ids, module_filter) and None are not
+                    # renderables; str() them so --show works with default config.
+                    v = json.dumps(v) if isinstance(v, (list, dict)) else str(v)
                 table.add_row(k, v)
         console.print(table)
         return
 
     changes = False
-    with console.status("[bold cyan]Saving configuration...[/bold cyan]", spinner="dots12"):
+    with _status("[bold cyan]Saving configuration...[/bold cyan]"):
         if api_key:
             set_config('api_key', api_key)
             changes = True
@@ -326,6 +446,9 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
             changes = True
         if model:
             set_config('model', model)
+            changes = True
+        if api_base:
+            set_config('api_base', api_base)
             changes = True
         if injection_template is not None:
             set_injection_template(injection_template)
@@ -350,6 +473,27 @@ def config(api_key, openai_key, openrouter_key, gemini_key, groq_key, model, sho
     else:
         console.print("[yellow]Usage:[/yellow] kl config --api-key ... --openai-key ... --model ... --injection-template ... --strict-mode ... --max-decisions ... --min-confidence ... --module-filter ...\nOr use --show to display current configuration.")
 
+def _agent_command(cmd, injection_path, injection_text):
+    """Return the agent argv with klyd's injection wired in.
+
+    Aider reads a file through ``--message-file``. OpenCode takes its prompt as
+    a positional argument to the ``run`` subcommand -- ``-m`` selects the
+    *model*, so the previous ``extend(['-m', injection])`` told OpenCode to use
+    the entire injection text as a model name and never delivered the prompt.
+    """
+    argv = list(cmd)
+    agent = argv[0].lower()
+
+    if agent == 'aider':
+        argv.extend(['--message-file', str(injection_path)])
+    elif agent == 'opencode':
+        if 'run' not in argv[1:]:
+            argv.insert(1, 'run')
+        argv.append(injection_text)
+
+    return argv
+
+
 @cli.command(context_settings={"ignore_unknown_options": True})
 @click.option('--no-inject', is_flag=True, help='Skip generating injection file')
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
@@ -364,7 +508,7 @@ def run(no_inject, relevance_mode, cmd):
     inj_path = klyd_dir / 'injection.txt'
     
     if not no_inject:
-        with console.status("[bold cyan]Preparing injection context...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Preparing injection context...[/bold cyan]"):
             try:
                 ctx = click.get_current_context()
                 # Pass relevance_mode to prepare_injection
@@ -376,10 +520,11 @@ def run(no_inject, relevance_mode, cmd):
     agent_name = run_cmd[0].lower()
     
     if inj_path.exists() and inj_path.stat().st_size > 0:
-        if agent_name == 'aider':
-            run_cmd.extend(['--message-file', str(inj_path)])
-        elif agent_name == 'opencode':
-            run_cmd.extend(['-m', inj_path.read_text()])
+        # Read as UTF-8 explicitly: the default locale encoding on Windows is
+        # cp1252, so a decision containing non-ASCII text crashed `kl run`.
+        run_cmd = _agent_command(
+            run_cmd, inj_path, inj_path.read_text(encoding='utf-8')
+        )
             
     console.print(Panel(f"[bold cyan]Launching[/bold cyan] {agent_name}...", title="[bold blue]AGENT START[/bold blue]", border_style="blue", expand=False))
     
@@ -415,10 +560,10 @@ def extract_commit():
         return
 
     try:
-        with console.status("[bold cyan]Extracting architectural decisions via LLM...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Extracting architectural decisions via LLM...[/bold cyan]"):
             db_path = str(klyd_dir / 'memory.db')
             existing = get_decisions_for_files(db_path, files, top_k=20)
-            existing_json = json.dumps(existing, indent=2)
+            existing_json = json.dumps(_json_safe_decisions(existing), indent=2)
 
             config_data = get_all_config()
             model = config_data.get('model', 'claude-sonnet-4-6')
@@ -466,9 +611,13 @@ def extract_commit():
 
     except Exception as e:
         err_log = klyd_dir / 'errors.log'
-        with open(err_log, 'a') as f:
+        with open(err_log, 'a', encoding='utf-8') as f:
             f.write(f"Error extracting commit:\n{traceback.format_exc()}\n")
-        return
+        # Do not swallow this: without a message, a user with no API key sees
+        # only "ERROR: Extraction failed" and has no way to know why.
+        console.print(f"[bold red]Extraction failed:[/bold red] {e}")
+        console.print("[dim]Check `kl config --show`, then set a key with `kl config --api-key ...`.[/dim]")
+        raise click.exceptions.Exit(1)
 
 @cli.command()
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
@@ -485,7 +634,7 @@ def prepare_injection(relevance_mode, min_confidence, module_filter, template):
         return
         
     try:
-        with console.status("[bold cyan]Preparing injection context...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Preparing injection context...[/bold cyan]"):
             files_out = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True)
             files = [f for f in files_out.strip().split('\n') if f]
             
@@ -541,7 +690,7 @@ def preview_injection(relevance_mode, min_confidence, module_filter, template):
         return
         
     try:
-        with console.status("[bold cyan]Generating preview...[/bold cyan]", spinner="dots12"):
+        with _status("[bold cyan]Generating preview...[/bold cyan]"):
             files_out = subprocess.check_output(['git', 'diff', '--cached', '--name-only'], text=True)
             files = [f for f in files_out.strip().split('\n') if f]
             
@@ -588,12 +737,15 @@ def pin(decision_id):
     decision = get_decision_by_id(str(db_path), decision_id)
     if not decision:
         console.print(f"[red]Decision with id {decision_id} not found.[/red]")
-        return
-    
+        raise click.exceptions.Exit(1)
+
     add_pinned_decision_id(decision_id)
     logger.info("Pinned decision", extra={'decision_id': decision_id})
+    text = decision['decision']
+    if len(text) > 60:
+        text = text[:60] + "..."
     console.print(Panel(
-        f"[bold green]Pinned decision {decision_id}:[/bold green] {decision['decision'][:60]}...",
+        f"[bold green]Pinned decision {decision_id}:[/bold green] {text}",
         border_style="green", expand=False
     ))
 
@@ -693,7 +845,7 @@ def review():
                 break
             elif choice == 'a':
                 # Accept+Merge: call LLM to suggest unified decision
-                with console.status("[bold cyan]Asking LLM to suggest a merge...[/bold cyan]", spinner="dots12"):
+                with _status("[bold cyan]Asking LLM to suggest a merge...[/bold cyan]"):
                     merged_text = _call_llm_for_merge(old_decision_text, d['decision'], config_data)
                 if merged_text:
                     console.print(Panel(
@@ -834,12 +986,11 @@ def status(search, tree, format_type, stats):
     # Handle export formats
     if format_type in ('markdown', 'html', 'json'):
         export_text = _export_status(active, flagged, stats_data, format_type)
-        if format_type == 'markdown':
-            console.print(Markdown(export_text))
-        elif format_type == 'html':
-            console.print(export_text)
-        elif format_type == 'json':
-            console.print(export_text)
+        # These formats are consumed by machines or pasted into files, so they
+        # must pass through byte-for-byte: Rich would word-wrap long lines (which
+        # puts literal newlines inside JSON string values and makes the output
+        # unparseable) and interpret HTML/markdown as console markup.
+        console.print(export_text, soft_wrap=True, markup=False, highlight=False)
         return
 
     # If --tree flag is set, show tree view
@@ -848,61 +999,73 @@ def status(search, tree, format_type, stats):
         console.print(tree_view)
         return
 
-    # Default table view
-    table = Table(box=rich.box.SIMPLE, header_style="bold cyan", show_edge=False, padding=(0, 2))
-    table.add_column("ID", style="dim", max_width=8)
-    table.add_column("Decision", style="white")
-    table.add_column("Module", style="bold blue")
-    table.add_column("Confidence")
-    table.add_column("Event")
-    table.add_column("Reinforcements", justify="right")
-
-    for d in active:
-        conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
-        conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
-        
-        event_color = "bright_blue" if d.get('event_type') == 'NEW' else ("bright_magenta" if d.get('event_type') == 'REINFORCE' else "bold bright_red")
-        event_styled = f"[{event_color}]{d.get('event_type', 'NEW')}[/{event_color}]"
-        
-        id_str = str(d['id'])
-        if d['id'] in pinned_ids:
-            id_str = f"[bold yellow]📌 {id_str}[/bold yellow]"
-        
-        table.add_row(
-            id_str,
-            d['decision'],
-            d['module'],
-            conf_styled,
-            event_styled,
-            f"x{d['reinforcement_count']}"
-        )
-    
     if not active:
-        table.add_row("", "[dim]No active architectural decisions stored yet.[/dim]", "", "", "", "")
+        # Do not put the empty state inside the table: with six columns and one
+        # long cell, Rich squeezes the Decision column and wraps the sentence
+        # character by character. This is the first screen a new user sees.
+        console.print(
+            Panel(
+                "[dim]No active architectural decisions stored yet.\n"
+                "Make a commit, then run `kl extract-commit`, or `kl review`.[/dim]",
+                title="[bold cyan] Architectural Memory [/bold cyan]",
+                border_style="cyan",
+                expand=False,
+                padding=(1, 2),
+            )
+        )
+    else:
+        # Six side-by-side columns do not fit in an 80-column terminal: Rich
+        # squeezes every column to its minimum, which truncates headers
+        # ("Reinforc...") and wraps the decision text one word per line. Lay
+        # each decision out as a block instead -- a short metadata line above
+        # the decision -- so the text has the full panel width and stays
+        # readable at any terminal size.
+        body = Table.grid(padding=(0, 1), expand=False)
+        body.add_column(no_wrap=True, width=4, style="dim", justify="right")
+        body.add_column(overflow="fold")
 
-    console.print(Panel(table, title="[bold cyan] Architectural Memory [/bold cyan]", border_style="cyan", expand=False, padding=(1, 2)))
+        for index, d in enumerate(active):
+            if index:
+                body.add_row("", "")
+
+            conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
+            conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
+
+            event_color = "bright_blue" if d.get('event_type') == 'NEW' else ("bright_magenta" if d.get('event_type') == 'REINFORCE' else "bold bright_red")
+            event_styled = f"[{event_color}]{d.get('event_type', 'NEW')}[/{event_color}]"
+
+            marker = "[bold yellow]*[/bold yellow] " if d['id'] in pinned_ids else ""
+            meta = (
+                f"[bold blue]{d['module']}[/bold blue]  "
+                f"{conf_styled}  {event_styled}  "
+                f"[dim]x{d['reinforcement_count']}[/dim]"
+            )
+
+            body.add_row(f"{marker}[dim]#{d['id']}[/dim]", meta)
+            body.add_row("", Text(d['decision'], style="white"))
+
+        console.print(Panel(body, title="[bold cyan] Architectural Memory [/bold cyan]", border_style="cyan", expand=False, padding=(1, 2)))
 
     if flagged:
         console.print()
-        flagged_table = Table(box=rich.box.SIMPLE, show_edge=False, padding=(0, 2))
-        flagged_table.add_column("ID", style="dim", max_width=8)
-        flagged_table.add_column("Decision", style="bold white")
-        flagged_table.add_column("Module", style="bold blue")
-        flagged_table.add_column("Confidence")
-        
-        for d in flagged:
+        flagged_body = Table.grid(padding=(0, 1), expand=False)
+        flagged_body.add_column(no_wrap=True, width=4, style="dim", justify="right")
+        flagged_body.add_column(overflow="fold")
+
+        for index, d in enumerate(flagged):
+            if index:
+                flagged_body.add_row("", "")
             conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
             conf_styled = f"[{conf_color}]{d['confidence']}[/{conf_color}]"
-            
-            flagged_table.add_row(
-                str(d['id'])[:8],
-                d['decision'],
-                d['module'],
-                conf_styled
+
+            flagged_body.add_row(
+                f"[dim]#{d['id']}[/dim]",
+                f"[bold blue]{d['module']}[/bold blue]  {conf_styled}",
             )
+            flagged_body.add_row("", Text(d['decision'], style="bold white"))
 
         warning_panel = Panel(
-            flagged_table,
+            flagged_body,
             title="[bold white on red] NEEDS REVIEW - CONFLICTS DETECTED [/bold white on red]",
             border_style="red",
             expand=False,
@@ -927,7 +1090,7 @@ def metrics():
     summary = get_metrics_summary(str(db_path))
 
     panel = Panel(
-        f"[bold]Decision count:[/bold] {summary['decision_count']}\n"
+        f"[bold]Decision count:[/bold] {int(summary['decision_count'])}\n"
         f"[bold]Average confidence:[/bold] {summary['avg_confidence']:.2f} (0=LOW, 1=MEDIUM, 2=HIGH)\n"
         f"[bold]Conflict rate:[/bold] {summary['conflict_rate']:.2%}",
         title="[bold cyan]klyd Metrics[/bold cyan]",
@@ -935,3 +1098,9 @@ def metrics():
         expand=False
     )
     console.print(panel)
+
+
+if __name__ == "__main__":
+    # Allows `python -m klyd.cli`, which is how the git hooks invoke klyd when
+    # no `kl` console script is reachable on PATH.
+    cli()

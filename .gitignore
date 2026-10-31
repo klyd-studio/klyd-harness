@@ -9,3 +9,5 @@ __pycache__/
 .env
 .klyd/
 .aider.conf.yml
+build/
+dist/

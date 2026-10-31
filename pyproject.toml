@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "klyd"
-version = "0.2.2"
-description = "A CLI tool that wraps coding agents via git hooks to inject architectural memory."
+version = "0.2.3"
+description = "A CLI tool that wraps coding agents via git hooks to inject architectural memory"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -21,4 +21,6 @@ include = ["klyd", "klyd.*"]
 kl = "klyd.cli:cli"
 
 [tool.setuptools.package-data]
-klyd = ["py.typed"]
+# Templates must ship inside the package: db.py and hooks.py resolve them
+# relative to the installed module, not the repository root.
+klyd = ["py.typed", "hook_templates/*.sh", "schema/*.sql"]

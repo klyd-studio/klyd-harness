@@ -1,4 +1,4 @@
-CREATE TABLE decisions (
+CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY,
     decision TEXT NOT NULL,
     module TEXT NOT NULL,
