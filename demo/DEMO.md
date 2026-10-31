@@ -42,6 +42,7 @@ git config user.name You
 # 2. install the harness
 kl init
 ls .git/hooks/post-commit      # show the absolute launcher, not a bare `kl`
+cat .gitignore                 # .klyd/ is ignored: config.json holds the key
 
 # 3. configure the provider once
 kl config --openrouter-key sk-or-... --model anthropic/claude-sonnet-4-6
@@ -117,6 +118,7 @@ recording*. The rest of the run is real.
 
 - `kl init` from a subdirectory initialises the repository root.
 - `kl init` twice is safe.
+- `kl init` ignores `.klyd/`, so `git add .` cannot stage the provider key.
 - `kl --help` in an unrelated directory leaves nothing behind.
 - `kl status --format json` survives decisions that carry embeddings.
 - `kl extract-commit` exits 1 and prints the reason when there is no key.

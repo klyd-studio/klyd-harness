@@ -59,6 +59,10 @@ does not need to be on `PATH` for the hook to run. The hook sends stdout to
 `/dev/null` and only stderr to `.klyd/errors.log`; a clean commit leaves that
 file empty.
 
+`kl init` also appends `.klyd/` to `.gitignore`, because `.klyd/config.json`
+stores the provider key in plaintext. Without that rule the demo's `git add .`
+would commit the key.
+
 The hook runs extraction in the background. For a live demo, either wait a few
 seconds after the commit or run `kl extract-commit` in the foreground in a
 repository where you have removed the hook. Do not run both at once unless you
