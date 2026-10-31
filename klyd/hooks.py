@@ -69,6 +69,32 @@ def install_hooks():
         dest.chmod(dest.stat().st_mode | stat.S_IEXEC)
         logger.info(f"Installed hook: {hook}", extra={'src': str(get_template_path(hook)), 'dest': str(dest)})
 
+GITIGNORE_ENTRY = ".klyd/"
+
+
+def ensure_gitignored():
+    """Add `.klyd/` to the repository's `.gitignore`.
+
+    `.klyd/config.json` stores provider keys in plaintext. A fresh repository
+    plus `git add .` would commit it -- which is exactly what the demo runbook
+    does. Returns True when the file was changed.
+    """
+    gitignore = Path('.gitignore')
+    entry = GITIGNORE_ENTRY
+
+    if gitignore.exists():
+        lines = gitignore.read_text(encoding='utf-8', errors='replace').splitlines()
+        if any(line.strip().rstrip('/') == '.klyd' for line in lines):
+            return False
+        prefix = '' if not lines or not lines[-1].strip() else '\n'
+        with open(gitignore, 'a', encoding='utf-8', newline='\n') as f:
+            f.write(prefix + entry + '\n')
+        return True
+
+    gitignore.write_text(entry + '\n', encoding='utf-8', newline='\n')
+    return True
+
+
 def uninstall_hooks():
     git_dir = Path('.git')
     if not git_dir.is_dir():

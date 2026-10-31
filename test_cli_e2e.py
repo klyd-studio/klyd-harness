@@ -122,6 +122,31 @@ def test_init_from_subdirectory_initialises_repository_root(tmp_path):
     assert not (nested / ".klyd").exists()
 
 
+def test_init_gitignores_local_state_so_keys_cannot_be_committed(tmp_path):
+    """`.klyd/config.json` holds the provider key in plaintext.
+
+    The demo does `git add .`; without an ignore rule that commits the key.
+    """
+    repo = make_repo(tmp_path)
+    (repo / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+
+    init_repo(repo)
+    init_repo(repo)  # idempotent: one entry, not two
+
+    text = (repo / ".gitignore").read_text(encoding="utf-8")
+    assert "node_modules/" in text
+    assert text.count(".klyd/") == 1
+
+    proc = run(repo, "config", "--openrouter-key", "sk-or-secret")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    (repo / "app.py").write_text("print('hello')\n", encoding="utf-8")
+    git(repo, "add", ".")
+    staged = git(repo, "diff", "--cached", "--name-only").stdout
+    assert "app.py" in staged
+    assert ".klyd" not in staged
+
+
 def test_hooks_are_installed_with_a_usable_launcher(tmp_path):
     """Hooks must not depend on `kl` being on the git process's PATH.
 

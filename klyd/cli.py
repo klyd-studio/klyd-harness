@@ -6,7 +6,7 @@ import sys
 import traceback
 import urllib.request
 from contextlib import contextmanager
-from .hooks import install_hooks
+from .hooks import install_hooks, ensure_gitignored
 from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject, get_min_confidence, set_min_confidence, get_module_filter, set_module_filter
 from .db import get_schema_path, migrate_db, get_decision_by_id, create_decision_version, merge_decisions, auto_archive_old_decisions, update_metrics, get_metrics_summary
 from .logger import setup_logger
@@ -372,6 +372,7 @@ def init():
     try:
         with _status("[bold cyan]Creating .klyd directory, database, and hooks...[/bold cyan]"):
             install_hooks()
+            ensure_gitignored()
             init_config()
             klyd_dir = Path('.klyd')
             db_path = klyd_dir / 'memory.db'
@@ -383,7 +384,7 @@ def init():
             update_metrics(str(db_path))
             
         console.print(Panel(
-            "Klyd harness initialised in [cyan].klyd[/cyan]\n\n[dim]Installed git hooks for automatic extraction.[/dim]\n[dim]Errors are logged to .klyd/errors.log[/dim]",
+            "Klyd harness initialised in [cyan].klyd[/cyan]\n\n[dim]Installed git hooks for automatic extraction.[/dim]\n[dim]Local state is ignored by git (.klyd/)[/dim]\n[dim]Errors are logged to .klyd/errors.log[/dim]",
             title="[bold green]SUCCESS[/bold green]", border_style="green", padding=(1, 2)
         ))
     except Exception as e:
