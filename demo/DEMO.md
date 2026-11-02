@@ -15,15 +15,18 @@ shipping code path either way.
 
 ## Prerequisites
 
-0.2.3 is not on PyPI yet. The published 0.2.2 wheel is missing the hook
-templates and schema, so do not use `pip install klyd` for the demo.
+0.2.3 is on PyPI. Install from there so the demo proves the shipping artifact,
+not a source checkout:
 
 ```sh
-git clone -b fix/clean-install-audit https://github.com/klyd-studio/klyd-harness
-cd klyd-harness
-pip install .          # or: pip install -e .
-git --version
+py -m venv demo-venv && demo-venv\Scripts\activate   # Windows
+# or: python3 -m venv demo-venv && source demo-venv/bin/activate
+pip install klyd==0.2.3
+kl --help | head -3
 ```
+
+The source tree is only needed for the rehearsal stub (`demo/stub_server.py`).
+If you are hacking on klyd itself, use `pip install -e .` from the repo.
 
 Optional, for the last shot: an agent CLI on `PATH` (`aider` or `opencode`).
 Without one, end the demo at the injection file — that is the part klyd owns.
