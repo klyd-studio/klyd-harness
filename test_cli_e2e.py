@@ -341,3 +341,149 @@ def test_extract_commit_without_a_key_explains_itself(tmp_path):
     assert "No valid API key" in combined
     assert "kl config --api-key" in combined
     assert "Traceback" not in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Regressions found by exercising every command against the published wheel
+# ---------------------------------------------------------------------------
+
+
+def test_version_flag(tmp_path):
+    """`kl --version` is the first thing a demo viewer types."""
+    from klyd import __version__
+
+    repo = make_repo(tmp_path)
+    proc = run(repo, "--version")
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert __version__ in proc.stdout
+
+
+def test_preview_injection_is_the_exact_injected_text(tmp_path):
+    """Preview must not let Rich eat `[auth]` or wrap long decisions.
+
+    The runbook says preview is "the exact text the agent will see"; it used to
+    differ from `.klyd/injection.txt` in both content and line breaks.
+    """
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    decision = (
+        "JWT signatures are verified with WebCrypto and the alg header is "
+        "ignored; never trust it, even when the token is signed by a trusted "
+        "issuer and the key id matches a cached key."
+    )
+    add_decision(repo, decision, module="auth")
+    (repo / "auth").mkdir()
+    (repo / "auth" / "session.ts").write_text(
+        "export const ttl = 60;\n", encoding="utf-8"
+    )
+    git(repo, "add", "auth/session.ts")
+
+    prepared = run(repo, "prepare-injection")
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    injection = (repo / ".klyd" / "injection.txt").read_text(encoding="utf-8")
+    assert "[auth]" in injection
+    assert decision in injection
+
+    preview = run(repo, "preview-injection")
+    assert preview.returncode == 0, preview.stdout + preview.stderr
+    assert preview.stdout == injection
+
+
+def test_pinned_decision_is_injected_for_unrelated_files(tmp_path):
+    """`pin` says "always appears in injection"; the file filter used to win."""
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    decision_id = add_decision(repo, "Auth uses WebCrypto.", module="auth")
+
+    pin = run(repo, "pin", str(decision_id))
+    assert pin.returncode == 0, pin.stdout + pin.stderr
+
+    (repo / "docs").mkdir()
+    (repo / "docs" / "notes.md").write_text("# notes\n", encoding="utf-8")
+    git(repo, "add", "docs/notes.md")
+
+    prepared = run(repo, "prepare-injection")
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    injection = (repo / ".klyd" / "injection.txt").read_text(encoding="utf-8")
+    assert "Auth uses WebCrypto." in injection
+
+
+def test_status_exports_escape_untrusted_text(tmp_path):
+    """A decision is model output; HTML and Markdown must not interpret it."""
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    add_decision(
+        repo,
+        'Use <script>alert("x")</script> & | pipe',
+        module="web",
+    )
+
+    html = run(repo, "status", "--format", "html")
+    assert html.returncode == 0, html.stdout + html.stderr
+    assert "&lt;script&gt;" in html.stdout
+    assert "<script>" not in html.stdout
+
+    markdown = run(repo, "status", "--format", "markdown")
+    assert markdown.returncode == 0, markdown.stdout + markdown.stderr
+    assert "\\| pipe" in markdown.stdout
+    assert "&lt;script&gt;" in markdown.stdout
+    assert "<script>" not in markdown.stdout
+    assert "&amp;" in markdown.stdout
+
+
+def test_run_injects_by_default_and_no_inject_does_not(tmp_path):
+    """`--no-inject` must not pass a stale injection file either."""
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    add_decision(repo, "Auth uses WebCrypto.", module="auth")
+    (repo / "auth").mkdir()
+    (repo / "auth" / "session.ts").write_text(
+        "export const ttl = 60;\n", encoding="utf-8"
+    )
+    git(repo, "add", "auth/session.ts")
+
+    agent = repo / "agent.py"
+    agent.write_text(
+        "import json, sys\n"
+        "from pathlib import Path\n"
+        "Path('argv.json').write_text(json.dumps(sys.argv), encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    capture = repo / "argv.json"
+
+    injected = run(repo, "run", sys.executable, str(agent))
+    assert injected.returncode == 0, injected.stdout + injected.stderr
+    argv = json.loads(capture.read_text(encoding="utf-8"))
+    assert "Auth uses WebCrypto." in argv[-1]
+
+    capture.unlink()
+    plain = run(repo, "run", "--no-inject", sys.executable, str(agent))
+    assert plain.returncode == 0, plain.stdout + plain.stderr
+    argv = json.loads(capture.read_text(encoding="utf-8"))
+    assert all("Auth uses WebCrypto." not in arg for arg in argv)
+
+
+def test_run_missing_agent_exits_non_zero(tmp_path):
+    """A wrapper that cannot launch its agent must not report success."""
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    proc = run(repo, "run", "definitely-not-an-agent")
+    assert proc.returncode == 1
+    assert "Command not found" in proc.stdout
+
+
+def test_extract_commit_without_a_commit_explains_itself(tmp_path):
+    """No HEAD is an error, not a silent no-op."""
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    proc = run(repo, "extract-commit")
+    assert proc.returncode == 1
+    assert "Cannot read the last commit" in proc.stdout
+
+
+def test_unpin_unknown_decision_is_honest(tmp_path):
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    proc = run(repo, "unpin", "999")
+    assert proc.returncode == 0
+    assert "was not pinned" in proc.stdout

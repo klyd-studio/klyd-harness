@@ -328,3 +328,81 @@ def test_redirected_output_survives_cp1252(tmp_path, stub_server):
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "UnicodeEncodeError" not in proc.stderr
     assert "charmap" not in proc.stderr
+
+
+# ---------------------------------------------------------------------------
+# Regressions found by exercising every command against the published wheel
+# ---------------------------------------------------------------------------
+
+
+def test_extraction_records_the_commit_hash(tmp_path, stub_server):
+    """A new decision must carry the commit it came from.
+
+    The INSERT path dropped `last_seen_commit`; only a duplicate update wrote
+    it. `kl status --format json` and `kl review` therefore showed null or
+    "unknown commit" for every freshly extracted decision.
+    """
+    server, base_url = stub_server
+    reply_with(
+        {
+            "decision": DECISION,
+            "module": "auth",
+            "file_patterns": "worker/*",
+            "confidence": "HIGH",
+            "event": "NEW",
+        }
+    )
+
+    repo = make_repo(tmp_path)
+    commit_auth_change(repo)
+    init_repo(repo)
+    configure_stub(repo, base_url)
+
+    extract = run(repo, "extract-commit")
+    assert extract.returncode == 0, extract.stdout + extract.stderr
+
+    head = git(repo, "rev-parse", "HEAD").stdout.strip()
+    payload = json.loads(run(repo, "status", "--format", "json").stdout)
+    assert payload["active_decisions"][0]["last_seen_commit"] == head
+
+
+def test_model_entry_without_a_decision_is_skipped(tmp_path, stub_server):
+    """A malformed `{}` entry must not become a stored "Unknown" decision."""
+    server, base_url = stub_server
+    reply_with({})
+
+    repo = make_repo(tmp_path)
+    commit_auth_change(repo)
+    init_repo(repo)
+    configure_stub(repo, base_url)
+
+    extract = run(repo, "extract-commit")
+    assert extract.returncode == 0, extract.stdout + extract.stderr
+
+    payload = json.loads(run(repo, "status", "--format", "json").stdout)
+    assert payload["active_decisions"] == []
+
+
+def test_review_merge_uses_the_configured_api_base(tmp_path, stub_server):
+    """Rehearsal with --api-base must cover the merge path too."""
+    from klyd.db import flag_decision
+    from test_cli_e2e import add_decision
+
+    server, base_url = stub_server
+    repo = make_repo(tmp_path)
+    init_repo(repo)
+    configure_stub(repo, base_url)
+    add_decision(repo, "Auth uses WebCrypto.", module="auth")
+    conflict_id = add_decision(repo, "Auth uses Clerk instead.", module="auth")
+    flag_decision(str(repo / ".klyd" / "memory.db"), conflict_id)
+
+    StubHandler.reply_text = "Auth uses WebCrypto with a strict algorithm allowlist."
+
+    review = run(repo, "review", input_text="a\ny\n")
+    assert review.returncode == 0, review.stdout + review.stderr
+    assert "Merged decision created" in review.stdout
+
+    payload = json.loads(run(repo, "status", "--format", "json").stdout)
+    assert payload["stats"]["flagged"] == 0
+    assert "strict algorithm allowlist" in payload["active_decisions"][0]["decision"]
+    assert StubHandler.requests[-1]["path"] == "/v1/chat/completions"

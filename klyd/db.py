@@ -128,14 +128,15 @@ def store_decision(db_path, decision_dict):
     cur = conn.cursor()
     try:
         cur.execute('''
-            INSERT INTO decisions (decision, module, file_patterns, confidence, event_type)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO decisions (decision, module, file_patterns, confidence, event_type, last_seen_commit)
+            VALUES (?, ?, ?, ?, ?, ?)
         ''', (
             decision_dict['decision'],
             decision_dict['module'],
             decision_dict['file_patterns'],
             decision_dict['confidence'],
-            decision_dict.get('event_type', 'NEW')
+            decision_dict.get('event_type', 'NEW'),
+            decision_dict.get('last_seen_commit')
         ))
         conn.commit()
         decision_id = cur.lastrowid
@@ -177,14 +178,15 @@ def store_decision_with_embedding(db_path, decision_dict, embedding_bytes=None):
     cur = conn.cursor()
     try:
         cur.execute('''
-            INSERT INTO decisions (decision, module, file_patterns, confidence, event_type, embedding)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO decisions (decision, module, file_patterns, confidence, event_type, last_seen_commit, embedding)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
             decision_dict['decision'],
             decision_dict['module'],
             decision_dict['file_patterns'],
             decision_dict['confidence'],
             decision_dict.get('event_type', 'NEW'),
+            decision_dict.get('last_seen_commit'),
             embedding_bytes
         ))
         conn.commit()

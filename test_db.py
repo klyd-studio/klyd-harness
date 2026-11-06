@@ -1,6 +1,13 @@
 import os
 import tempfile
-from klyd.db import init_db, store_decision, get_decisions_for_files, flag_decision
+from klyd.db import (
+    init_db,
+    store_decision,
+    store_decision_with_embedding,
+    get_decisions_for_files,
+    get_decision_by_id,
+    flag_decision,
+)
 
 def test_db_flow():
     # Use a temporary file to avoid collisions
@@ -56,6 +63,37 @@ def test_db_flow():
         # d6 should be the same id as d1
         assert d6 == d1
 
+    finally:
+        if os.path.exists(db_path):
+            os.remove(db_path)
+
+
+def test_store_decision_persists_last_seen_commit_on_insert():
+    """Both insert paths must write the commit hash, not only the update path."""
+    with tempfile.NamedTemporaryFile(suffix='.db', delete=False) as tmp:
+        db_path = tmp.name
+
+    try:
+        init_db(db_path)
+        first = store_decision(db_path, {
+            'decision': 'Auth uses WebCrypto.',
+            'module': 'auth',
+            'file_patterns': 'auth/*',
+            'confidence': 'HIGH',
+            'event_type': 'NEW',
+            'last_seen_commit': 'abc123',
+        })
+        assert get_decision_by_id(db_path, first)['last_seen_commit'] == 'abc123'
+
+        second = store_decision_with_embedding(db_path, {
+            'decision': 'Sessions are stateless.',
+            'module': 'auth',
+            'file_patterns': 'auth/*',
+            'confidence': 'MEDIUM',
+            'event_type': 'NEW',
+            'last_seen_commit': 'def456',
+        })
+        assert get_decision_by_id(db_path, second)['last_seen_commit'] == 'def456'
     finally:
         if os.path.exists(db_path):
             os.remove(db_path)

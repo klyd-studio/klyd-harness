@@ -5,6 +5,7 @@ import os
 import sys
 import traceback
 import urllib.request
+import html
 from contextlib import contextmanager
 from .hooks import install_hooks, ensure_gitignored
 from .config import init_config, set_config, get_config, get_all_config, get_injection_template, set_injection_template, get_strict_mode, set_strict_mode, get_pinned_decision_ids, add_pinned_decision_id, remove_pinned_decision_id, clear_pinned_decision_ids, get_max_decisions_inject, set_max_decisions_inject, get_min_confidence, set_min_confidence, get_module_filter, set_module_filter
@@ -21,9 +22,12 @@ from rich.prompt import Prompt
 from rich.text import Text
 from rich.tree import Tree
 from rich.markdown import Markdown
+from rich.markup import escape as rich_escape
 import rich.box
 import io
 import datetime
+
+from . import __version__
 
 logger = setup_logger(__name__)
 
@@ -102,6 +106,7 @@ def _find_git_root(start=None):
 
 
 @click.group(cls=KlydGroup)
+@click.version_option(__version__, prog_name="kl", message="%(prog)s %(version)s")
 @click.pass_context
 def cli(ctx):
     """klyd: a CLI tool that wraps coding agents via git hooks to inject architectural memory."""
@@ -137,6 +142,19 @@ Return ONLY the unified decision text, no explanation, no markdown, no JSON.
     is_anthropic_model = model.startswith('claude-') or model.startswith('anthropic/')
     
     try:
+        api_base = config_data.get('api_base')
+        if api_base:
+            # Rehearsal parity: extraction already honors --api-base, so the
+            # merge path must use the same local stub instead of a real provider.
+            from .extractor import _call_openai_compatible
+            key = (
+                config_data.get('openai_key')
+                or config_data.get('openrouter_key')
+                or config_data.get('api_key')
+                or 'not-needed'
+            )
+            url = api_base.rstrip('/') + '/chat/completions'
+            return _call_openai_compatible(url, key, model, prompt).strip()
         if is_anthropic_model and 'api_key' in config_data and not any(k in config_data for k in ['openai_key', 'openrouter_key', 'gemini_key', 'groq_key']):
             from anthropic import Anthropic
             client = Anthropic(api_key=config_data['api_key'])
@@ -254,14 +272,14 @@ def _build_module_tree(decisions, pinned_ids):
         modules[mod].append(d)
     
     for mod in sorted(modules.keys()):
-        mod_node = tree.add(f"[bold blue]{mod}[/bold blue]")
+        mod_node = tree.add(f"[bold blue]{rich_escape(str(mod))}[/bold blue]")
         for d in modules[mod]:
             conf_color = "bold bright_green" if d['confidence'] == 'HIGH' else ("bold bright_yellow" if d['confidence'] == 'MEDIUM' else "dim white")
             id_str = str(d['id'])
             if d['id'] in pinned_ids:
                 id_str = f"* {id_str}"
             decision_text = d['decision'][:60] + '...' if len(d['decision']) > 60 else d['decision']
-            mod_node.add(f"[{conf_color}]{id_str}: {decision_text}[/{conf_color}]")
+            mod_node.add(f"[{conf_color}]{id_str}: {rich_escape(decision_text)}[/{conf_color}]")
     return tree
 
 
@@ -280,6 +298,23 @@ def _json_safe_decisions(decisions):
         }
         for decision in decisions
     ]
+
+
+def _markdown_cell(value):
+    """Escape a value for a Markdown table cell.
+
+    Decisions are model output and may contain raw HTML. Markdown renderers
+    pass that through, so escape entities as well as the table delimiter.
+    """
+    text = str(value).replace('&', '&amp;')
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    text = text.replace('\\', '\\\\').replace('|', '\\|')
+    return text.replace('\r', ' ').replace('\n', ' ')
+
+
+def _html_cell(value):
+    """Escape a value for HTML text content."""
+    return html.escape(str(value), quote=True)
 
 
 def _export_status(active, flagged, stats, format_type):
@@ -305,7 +340,11 @@ def _export_status(active, flagged, stats, format_type):
         lines.append("| ID | Decision | Module | Confidence | Reinforcements |")
         lines.append("|----|----------|--------|------------|----------------|")
         for d in active:
-            lines.append(f"| {d['id']} | {d['decision'][:60]} | {d['module']} | {d['confidence']} | {d['reinforcement_count']} |")
+            lines.append(
+                f"| {d['id']} | {_markdown_cell(d['decision'][:60])} | "
+                f"{_markdown_cell(d['module'])} | {_markdown_cell(d['confidence'])} | "
+                f"{d['reinforcement_count']} |"
+            )
         if flagged:
             lines.append("")
             lines.append("## Flagged Decisions (Needs Review)")
@@ -313,7 +352,10 @@ def _export_status(active, flagged, stats, format_type):
             lines.append("| ID | Decision | Module | Confidence |")
             lines.append("|----|----------|--------|------------|")
             for d in flagged:
-                lines.append(f"| {d['id']} | {d['decision'][:60]} | {d['module']} | {d['confidence']} |")
+                lines.append(
+                    f"| {d['id']} | {_markdown_cell(d['decision'][:60])} | "
+                    f"{_markdown_cell(d['module'])} | {_markdown_cell(d['confidence'])} |"
+                )
         return '\n'.join(lines)
     elif format_type == 'html':
         lines = []
@@ -327,13 +369,20 @@ def _export_status(active, flagged, stats, format_type):
         lines.append("<h2>Active Decisions</h2>")
         lines.append("<table border='1'><tr><th>ID</th><th>Decision</th><th>Module</th><th>Confidence</th><th>Reinforcements</th></tr>")
         for d in active:
-            lines.append(f"<tr><td>{d['id']}</td><td>{d['decision'][:60]}</td><td>{d['module']}</td><td>{d['confidence']}</td><td>{d['reinforcement_count']}</td></tr>")
+            lines.append(
+                f"<tr><td>{d['id']}</td><td>{_html_cell(d['decision'][:60])}</td>"
+                f"<td>{_html_cell(d['module'])}</td><td>{_html_cell(d['confidence'])}</td>"
+                f"<td>{d['reinforcement_count']}</td></tr>"
+            )
         lines.append("</table>")
         if flagged:
             lines.append("<h2>Flagged Decisions (Needs Review)</h2>")
             lines.append("<table border='1'><tr><th>ID</th><th>Decision</th><th>Module</th><th>Confidence</th></tr>")
             for d in flagged:
-                lines.append(f"<tr><td>{d['id']}</td><td>{d['decision'][:60]}</td><td>{d['module']}</td><td>{d['confidence']}</td></tr>")
+                lines.append(
+                    f"<tr><td>{d['id']}</td><td>{_html_cell(d['decision'][:60])}</td>"
+                    f"<td>{_html_cell(d['module'])}</td><td>{_html_cell(d['confidence'])}</td></tr>"
+                )
             lines.append("</table>")
         lines.append("</body></html>")
         return '\n'.join(lines)
@@ -482,7 +531,9 @@ def _agent_command(cmd, injection_path, injection_text):
     the entire injection text as a model name and never delivered the prompt.
     """
     argv = list(cmd)
-    agent = argv[0].lower()
+    # Use the executable stem so `C:\tools\opencode.exe` and `opencode` are
+    # treated the same. A full path used to fall through to the generic branch.
+    agent = Path(argv[0]).stem.lower()
 
     if agent == 'aider':
         argv.extend(['--message-file', str(injection_path)])
@@ -490,12 +541,18 @@ def _agent_command(cmd, injection_path, injection_text):
         if 'run' not in argv[1:]:
             argv.insert(1, 'run')
         argv.append(injection_text)
+    else:
+        # Generic agents receive the memory as their final positional argument,
+        # which is what the README promises ("injected via command-line
+        # arguments"). This branch was missing, so every non-aider/opencode
+        # agent ran with no memory at all.
+        argv.append(injection_text)
 
     return argv
 
 
 @cli.command(context_settings={"ignore_unknown_options": True})
-@click.option('--no-inject', is_flag=True, help='Skip generating injection file')
+@click.option('--no-inject', is_flag=True, help='Run the agent without generating or passing klyd injection')
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
 @click.argument('cmd', nargs=-1, type=click.UNPROCESSED)
 def run(no_inject, relevance_mode, cmd):
@@ -508,18 +565,23 @@ def run(no_inject, relevance_mode, cmd):
     inj_path = klyd_dir / 'injection.txt'
     
     if not no_inject:
+        # Never let a failed prepare fall back to the previous session's file.
+        try:
+            inj_path.unlink(missing_ok=True)
+        except OSError:
+            pass
         with _status("[bold cyan]Preparing injection context...[/bold cyan]"):
             try:
                 ctx = click.get_current_context()
                 # Pass relevance_mode to prepare_injection
                 ctx.invoke(prepare_injection, relevance_mode=relevance_mode)
             except Exception as e:
-                pass
+                console.print(f"[yellow]Could not prepare injection: {e}[/yellow]")
             
     run_cmd = list(cmd)
-    agent_name = run_cmd[0].lower()
+    agent_name = Path(run_cmd[0]).stem.lower()
     
-    if inj_path.exists() and inj_path.stat().st_size > 0:
+    if not no_inject and inj_path.exists() and inj_path.stat().st_size > 0:
         # Read as UTF-8 explicitly: the default locale encoding on Windows is
         # cp1252, so a decision containing non-ASCII text crashed `kl run`.
         run_cmd = _agent_command(
@@ -529,10 +591,14 @@ def run(no_inject, relevance_mode, cmd):
     console.print(Panel(f"[bold cyan]Launching[/bold cyan] {agent_name}...", title="[bold blue]AGENT START[/bold blue]", border_style="blue", expand=False))
     
     try:
-        subprocess.run(run_cmd)
+        completed = subprocess.run(run_cmd)
         console.print(Panel("[bold green]Agent session ended[/bold green]", title="[bold green]DONE[/bold green]", border_style="green", expand=False))
+        # `kl run` is a wrapper: a script must see the agent's failure, not 0.
+        if completed.returncode != 0:
+            raise click.exceptions.Exit(completed.returncode)
     except FileNotFoundError:
         console.print(f"[red]Command not found: {cmd[0]}[/red]")
+        raise click.exceptions.Exit(1)
 
 @cli.command()
 def extract_commit():
@@ -545,16 +611,22 @@ def extract_commit():
         return
     
     try:
-        diff = subprocess.check_output(['git', 'show', 'HEAD'], text=True)
-        files_out = subprocess.check_output(['git', 'show', '--name-only', '--format=', 'HEAD'], text=True)
-        msg = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True)
+        # Suppress git's own fatal message: the caller gets klyd's explanation,
+        # not a raw `fatal: ambiguous argument 'HEAD'` above it.
+        diff = subprocess.check_output(['git', 'show', 'HEAD'], text=True, stderr=subprocess.DEVNULL)
+        files_out = subprocess.check_output(['git', 'show', '--name-only', '--format=', 'HEAD'], text=True, stderr=subprocess.DEVNULL)
+        msg = subprocess.check_output(['git', 'log', '-1', '--format=%B'], text=True, stderr=subprocess.DEVNULL)
         files = [f for f in files_out.strip().split('\n') if f]
-        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()
+        commit_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True, stderr=subprocess.DEVNULL).strip()
     except subprocess.CalledProcessError as e:
         err_log = klyd_dir / 'errors.log'
         with open(err_log, 'a') as f:
             f.write(f"Error running git command: {e}\n")
-        return
+        console.print(
+            f"[bold red]Cannot read the last commit:[/bold red] {e}\n"
+            "[dim]Make a commit first, then run `kl extract-commit`.[/dim]"
+        )
+        raise click.exceptions.Exit(1)
 
     if not files:
         return
@@ -619,6 +691,25 @@ def extract_commit():
         console.print("[dim]Check `kl config --show`, then set a key with `kl config --api-key ...`.[/dim]")
         raise click.exceptions.Exit(1)
 
+def _include_pinned_decisions(db_path, decisions):
+    """Append active pinned decisions the file filter did not return.
+
+    `kl pin` promises a decision always appears in injection. The file query
+    only returns decisions whose patterns match the staged files, so a pinned
+    decision for another module silently disappeared. Pinned means pinned.
+    """
+    pinned_ids = get_pinned_decision_ids()
+    seen = {d['id'] for d in decisions}
+    for decision_id in pinned_ids:
+        if decision_id in seen:
+            continue
+        decision = get_decision_by_id(db_path, decision_id)
+        if decision and not decision.get('flagged') and not decision.get('archived'):
+            decisions.append(decision)
+            seen.add(decision_id)
+    return decisions
+
+
 @cli.command()
 @click.option('--relevance-mode', type=click.Choice(['balanced', 'strict']), default='balanced', help='Relevance scoring mode')
 @click.option('--min-confidence', type=click.Choice(['LOW', 'MEDIUM', 'HIGH']), default=None, help='Minimum confidence level')
@@ -639,12 +730,13 @@ def prepare_injection(relevance_mode, min_confidence, module_filter, template):
             files = [f for f in files_out.strip().split('\n') if f]
             
             if not files:
-                with open(klyd_dir / 'injection.txt', 'w') as f:
+                with open(klyd_dir / 'injection.txt', 'w', encoding='utf-8', newline='\n') as f:
                     f.write('')
                 return
                 
             db_path = str(klyd_dir / 'memory.db')
             decisions = get_decisions_for_files(db_path, files, top_k=20)
+            decisions = _include_pinned_decisions(db_path, decisions)
             
             task_description = None
             
@@ -664,7 +756,10 @@ def prepare_injection(relevance_mode, min_confidence, module_filter, template):
                 module_filter=module_list,
                 preview=False
             )
-            with open(klyd_dir / 'injection.txt', 'w') as f:
+            # UTF-8 and LF explicitly: the default Windows locale encoding
+            # (cp1252) cannot represent many model-written decisions, and the
+            # agent reads this file back as UTF-8.
+            with open(klyd_dir / 'injection.txt', 'w', encoding='utf-8', newline='\n') as f:
                 f.write(injection)
                 
         console.print(Panel("[green]Injection file ready at .klyd/injection.txt[/green]", border_style="green", expand=False))
@@ -700,6 +795,7 @@ def preview_injection(relevance_mode, min_confidence, module_filter, template):
                 
             db_path = str(klyd_dir / 'memory.db')
             decisions = get_decisions_for_files(db_path, files, top_k=20)
+            decisions = _include_pinned_decisions(db_path, decisions)
             
             task_description = None
             
@@ -745,7 +841,7 @@ def pin(decision_id):
     if len(text) > 60:
         text = text[:60] + "..."
     console.print(Panel(
-        f"[bold green]Pinned decision {decision_id}:[/bold green] {text}",
+        f"[bold green]Pinned decision {decision_id}:[/bold green] {rich_escape(text)}",
         border_style="green", expand=False
     ))
 
@@ -758,6 +854,9 @@ def unpin(decision_id):
         logger.info("Unpinned all decisions")
         console.print("[bold yellow]All decisions unpinned.[/bold yellow]")
     else:
+        if decision_id not in get_pinned_decision_ids():
+            console.print(f"[yellow]Decision {decision_id} was not pinned.[/yellow]")
+            return
         remove_pinned_decision_id(decision_id)
         logger.info("Unpinned decision", extra={'decision_id': decision_id})
         console.print(f"[bold yellow]Unpinned decision {decision_id}.[/bold yellow]")

@@ -174,7 +174,10 @@ def format_injection(
     if preview:
         from rich.console import Console
         console = Console()
-        console.print(result)
+        # This must be byte-for-byte the text written to injection.txt. Rich
+        # otherwise treats a module tag like [auth] as markup and wraps long
+        # decisions at the terminal width, so the preview lied about the file.
+        console.print(result, soft_wrap=True, markup=False, highlight=False, end="")
         return result
 
     logger.info("Injection formatted", extra={'decision_count': len(final_decisions)})

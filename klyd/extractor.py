@@ -147,6 +147,11 @@ Existing architectural invariants (do not violate unless explicitly instructed):
         
         normalized = []
         for r in result:
+            # A malformed entry must not become a stored "Unknown" decision.
+            # The prompt requires a decision string; skip anything that lacks it.
+            if not isinstance(r, dict) or not r.get('decision'):
+                logger.warning("Skipping LLM decision without a decision field", extra={'entry': r})
+                continue
             event_val = r.get('event') or r.get('event_type') or 'NEW'
             summary = r.get('semantic_summary', r.get('decision', ''))
             # Compute embedding from the semantic summary
