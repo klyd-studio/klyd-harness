@@ -53,12 +53,14 @@ class Handler(BaseHTTPRequestHandler):
             prompt = messages[0].get("content", "")
 
         if self.verbose:
-            print(f"POST {self.path}  model={body.get('model')}")
-            print(f"  prompt: {len(prompt)} chars")
+            # flush: the runbook redirects this log, where stdout is block-
+            # buffered and would otherwise hide the prompt until shutdown.
+            print(f"POST {self.path}  model={body.get('model')}", flush=True)
+            print(f"  prompt: {len(prompt)} chars", flush=True)
             for line in prompt.splitlines():
                 if line.startswith("diff --git"):
-                    print(f"  {line}")
-            print()
+                    print(f"  {line}", flush=True)
+            print(flush=True)
 
         payload = json.dumps(
             {"choices": [{"message": {"content": type(self).reply_text}}]}
@@ -92,9 +94,9 @@ def main() -> int:
     Handler.verbose = not args.quiet
 
     server = HTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"stub listening on http://127.0.0.1:{args.port}/v1")
+    print(f"stub listening on http://127.0.0.1:{args.port}/v1", flush=True)
     print("point klyd at it with: kl config --api-base http://127.0.0.1:"
-          f"{args.port}/v1")
+          f"{args.port}/v1", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

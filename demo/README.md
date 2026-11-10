@@ -9,13 +9,14 @@ The data is seeded, not extracted; label it that way if it appears on screen.
 
 ## Install for any path
 
-0.2.3 is not on PyPI yet, and 0.2.2 is broken. Install from the audit branch:
+0.2.4 is on PyPI. Install the published wheel so the demo proves the shipping
+artifact:
 
 ```sh
-git clone -b fix/clean-install-audit https://github.com/klyd-studio/klyd-harness
-cd klyd-harness
-pip install .
+pip install klyd==0.2.4
 ```
+
+The source tree is only needed for the rehearsal stub (`demo/stub_server.py`).
 
 ## Seeded path (no key, ~40 seconds)
 

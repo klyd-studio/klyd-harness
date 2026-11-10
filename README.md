@@ -144,21 +144,14 @@ SELECT * FROM ancestors;
 
 ### 1. Install Klyd
 
-> **0.2.3 is not on PyPI yet.** The published 0.2.2 wheel is missing its hook
-> templates and SQL schema, so `pip install klyd` installs a CLI that cannot
-> initialise a repository. Until 0.2.3 ships, install from this branch:
+> **0.2.4 is the current release.** The 0.2.2 wheel was missing its hook
+> templates and SQL schema; 0.2.3 fixed packaging, and 0.2.4 fixes the CLI
+> defects found by exercising every command against the published wheel.
+> Install the current release:
 >
 > ```bash
-> git clone -b fix/clean-install-audit https://github.com/klyd-studio/klyd-harness
-> cd klyd-harness
-> pip install .
+> pip install klyd==0.2.4
 > ```
-
-Once 0.2.3 is released:
-
-```bash
-pip install klyd
-```
 
 ### 2. Initialize a repository
 
@@ -258,13 +251,13 @@ kl prepare-injection
 
 ## Current status
 
-Klyd is an actively developed developer-tooling project (v0.2.2 distributed on PyPI).
+Klyd is an actively developed developer-tooling project (v0.2.4 distributed on PyPI).
 
 The current implementation is focused on local decision persistence, retrieval, Git lifecycle integration, and terminal coding-agent workflows.
 
 - **Local scope**: Designed for single-developer repository workspaces. Remote peer sync and multi-user concurrent locking are not included.
 - **LLM extraction dependency**: Quality of extracted decisions correlates with commit message clarity and the reasoning capabilities of the configured model.
-- **Agent support**: Native argument injection is configured for `aider` and `opencode`; other agents consume `.klyd/injection.txt` via their respective context-file arguments.
+- **Agent support**: Native argument injection is configured for `aider` and `opencode`; other agents receive the injection as a final positional argument. The same text is written to `.klyd/injection.txt` for agents that take a context-file flag.
 
 ---
 
