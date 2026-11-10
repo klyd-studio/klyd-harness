@@ -9,11 +9,11 @@ The data is seeded, not extracted; label it that way if it appears on screen.
 
 ## Install for any path
 
-0.2.4 is on PyPI. Install the published wheel so the demo proves the shipping
+0.2.5 is on PyPI. Install the published wheel so the demo proves the shipping
 artifact:
 
 ```sh
-pip install klyd==0.2.4
+pip install klyd==0.2.5
 ```
 
 The source tree is only needed for the rehearsal stub (`demo/stub_server.py`).

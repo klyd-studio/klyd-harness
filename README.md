@@ -144,13 +144,14 @@ SELECT * FROM ancestors;
 
 ### 1. Install Klyd
 
-> **0.2.4 is the current release.** The 0.2.2 wheel was missing its hook
-> templates and SQL schema; 0.2.3 fixed packaging, and 0.2.4 fixes the CLI
-> defects found by exercising every command against the published wheel.
+> **0.2.5 is the current release.** The 0.2.2 wheel was missing its hook
+> templates and SQL schema; 0.2.3 fixed packaging, 0.2.4 fixed the CLI defects
+> found by exercising every command against the published wheel, and 0.2.5
+> bounds the provider request so a stalled model cannot hang the git hook.
 > Install the current release:
 >
 > ```bash
-> pip install klyd==0.2.4
+> pip install klyd==0.2.5
 > ```
 
 ### 2. Initialize a repository
@@ -179,6 +180,16 @@ Inspect active configuration:
 ```bash
 kl config --show
 ```
+
+Provider requests time out after 90 seconds so a stalled gateway cannot hang the
+post-commit hook. Override the limit in seconds with `KLYD_HTTP_TIMEOUT`:
+
+```bash
+KLYD_HTTP_TIMEOUT=180 kl extract-commit
+```
+
+A timeout exits non-zero, names the provider URL, and writes the traceback to
+`.klyd/errors.log`.
 
 ### 4. Record decisions from commits
 
@@ -251,7 +262,7 @@ kl prepare-injection
 
 ## Current status
 
-Klyd is an actively developed developer-tooling project (v0.2.4 distributed on PyPI).
+Klyd is an actively developed developer-tooling project (v0.2.5 distributed on PyPI).
 
 The current implementation is focused on local decision persistence, retrieval, Git lifecycle integration, and terminal coding-agent workflows.
 

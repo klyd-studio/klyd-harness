@@ -15,7 +15,7 @@ shipping code path either way.
 
 ## Prerequisites
 
-0.2.4 is on PyPI. Install from there so the demo proves the shipping artifact,
+0.2.5 is on PyPI. Install from there so the demo proves the shipping artifact,
 not a source checkout. Run the shell blocks in Git Bash on Windows: the git
 hooks are POSIX `sh`, and PowerShell will not run them.
 
@@ -23,7 +23,7 @@ hooks are POSIX `sh`, and PowerShell will not run them.
 py -m venv demo-venv
 source demo-venv/Scripts/activate       # Windows, in Git Bash
 # or: python3 -m venv demo-venv && source demo-venv/bin/activate
-pip install klyd==0.2.4
+pip install klyd==0.2.5
 kl --version
 ```
 
@@ -157,6 +157,9 @@ recording*. The rest of the run is real.
   generic agents receive the injection as a final argument.
 - `kl unpin 999` says the decision was not pinned instead of claiming success.
 - Injection files are UTF-8 with LF endings, so non-ASCII decisions survive.
+- A provider that accepts the connection and then goes silent fails after 90
+  seconds with the URL and the limit in the message. Set `KLYD_HTTP_TIMEOUT` to
+  change it. Before 0.2.5 the hook could hang indefinitely.
 
 ## What is proven, and what is not
 
@@ -167,11 +170,16 @@ The second commit was clean (`errors.log` 0 bytes). A deliberately contradicting
 commit was flagged, and `kl review` option `a` produced a real LLM merge that was
 accepted. The transcript is in the audit write-up (`05-cli-audit.md`).
 
-**Also proven on 2026-11-06, against the published 0.2.3 wheel and the built
-0.2.4 wheel:** every klyd command was exercised, including all six `kl review`
-actions, every status export, pin/unpin, and `kl run` with a stub agent. The
-0.2.4 suite is 35 tests. The defects listed above were found by that audit and
-fixed in 0.2.4.
+**Also proven on 2026-11-06/10, against the published 0.2.3 and 0.2.4 wheels and
+the built 0.2.5 wheel:** every klyd command was exercised, including all six
+`kl review` actions, every status export, pin/unpin, and `kl run` with a stub
+agent. The 0.2.5 suite is 36 tests. The defects listed above were found by that
+audit and fixed in 0.2.4 and 0.2.5.
+
+**Live 0.2.4 extraction:** a real `openrouter/free` call eventually returned and
+stored a decision, but took about 213 seconds. That is why 0.2.5 adds the
+bounded timeout: the same stall now fails visibly instead of leaving two
+post-commit processes blocked.
 
 **Not proven:** the specific paid model `anthropic/claude-sonnet-4-6`. The test
 key had $0 credit, so a paid call would 402. The wire path is the same; the model

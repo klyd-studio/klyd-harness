@@ -18,9 +18,11 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
@@ -83,6 +85,37 @@ def stub_server():
     finally:
         server.shutdown()
         server.server_close()
+
+
+@pytest.fixture
+def silent_server():
+    """Accept connections and never answer, like a stalled provider."""
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+    stop = threading.Event()
+    held: list[socket.socket] = []
+
+    def accept_and_hold():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                continue
+            held.append(conn)
+
+    thread = threading.Thread(target=accept_and_hold, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{port}/v1"
+    finally:
+        stop.set()
+        for conn in held:
+            conn.close()
+        listener.close()
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +273,42 @@ def test_provider_error_fails_loudly(tmp_path, stub_server):
     combined = proc.stdout + proc.stderr
     assert "Extraction failed" in combined
     assert "500" in combined
+
+
+def test_stalled_provider_times_out_instead_of_hanging(tmp_path, silent_server):
+    """A provider that accepts and then goes silent must not hang the hook.
+
+    `urlopen` has no timeout by default. A live OpenRouter call left two
+    post-commit processes blocked for minutes with an empty errors.log. The
+    timeout must be bounded and the failure must name the cause.
+    """
+    repo = make_repo(tmp_path)
+    commit_auth_change(repo)
+    init_repo(repo)
+    configure_stub(repo, silent_server)
+
+    env = os.environ.copy()
+    env["KLYD_HTTP_TIMEOUT"] = "0.2"
+    started = time.monotonic()
+    proc = subprocess.run(
+        [sys.executable, "-m", "klyd.cli", "extract-commit"],
+        cwd=str(repo),
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+    elapsed = time.monotonic() - started
+
+    assert proc.returncode == 1
+    combined = proc.stdout + proc.stderr
+    assert "did not respond within 0.2s" in combined
+    assert "KLYD_HTTP_TIMEOUT" in combined
+    assert elapsed < 15, f"extraction took {elapsed:.1f}s; timeout did not fire"
+    errors = (repo / ".klyd" / "errors.log").read_text(encoding="utf-8")
+    assert "TimeoutError" in errors
 
 
 # ---------------------------------------------------------------------------

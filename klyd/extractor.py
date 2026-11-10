@@ -1,10 +1,35 @@
 import json
+import os
+import socket
+import urllib.error
 import urllib.request
 from anthropic import Anthropic
 from .db import get_existing_decisions_for_files, compute_embedding
 from .logger import setup_logger
 
 logger = setup_logger(__name__)
+
+# A stalled provider used to hang the post-commit hook forever: urlopen has no
+# timeout by default. 90 seconds is generous for a one-shot extraction and
+# still bounds the background process. Override with KLYD_HTTP_TIMEOUT.
+REQUEST_TIMEOUT_SECONDS = 90.0
+
+
+def _request_timeout():
+    """Return the provider timeout, honoring KLYD_HTTP_TIMEOUT for tests/ops."""
+    raw = os.environ.get('KLYD_HTTP_TIMEOUT')
+    if not raw:
+        return REQUEST_TIMEOUT_SECONDS
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(
+            f"KLYD_HTTP_TIMEOUT must be a number of seconds, got {raw!r}"
+        ) from None
+    if value <= 0:
+        raise ValueError("KLYD_HTTP_TIMEOUT must be greater than zero")
+    return value
+
 
 def _call_openai_compatible(url, key, model, prompt):
     data = json.dumps({
@@ -19,10 +44,27 @@ def _call_openai_compatible(url, key, model, prompt):
         headers["HTTP-Referer"] = "https://github.com/getKlyd/klyd"
         headers["X-Title"] = "klyd"
         
+    timeout = _request_timeout()
     req = urllib.request.Request(url, data=data, headers=headers)
-    with urllib.request.urlopen(req) as response:
-        res = json.loads(response.read().decode('utf-8'))
-        return res['choices'][0]['message']['content']
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as response:
+            res = json.loads(response.read().decode('utf-8'))
+            return res['choices'][0]['message']['content']
+    except (TimeoutError, socket.timeout) as exc:
+        raise TimeoutError(_timeout_message(url, timeout)) from exc
+    except urllib.error.URLError as exc:
+        reason = exc.reason
+        if isinstance(reason, (TimeoutError, socket.timeout)) or 'timed out' in str(reason).lower():
+            raise TimeoutError(_timeout_message(url, timeout)) from exc
+        raise
+
+
+def _timeout_message(url, timeout):
+    return (
+        f"The model provider at {url} did not respond within {timeout:g}s. "
+        "Check the provider status or your network, then retry. "
+        "Set KLYD_HTTP_TIMEOUT to change the limit."
+    )
 
 def extract_decisions(diff, commit_message, existing_decisions, config_data, model='claude-sonnet-4-6'):
     logger.info("Extracting decisions from commit", extra={'model': model})
