@@ -174,9 +174,10 @@ The second commit was clean (`errors.log` 0 bytes). A deliberately contradicting
 commit was flagged, and `kl review` option `a` produced a real LLM merge that was
 accepted. The transcript is in the audit write-up (`05-cli-audit.md`).
 
-**Also proven on 2026-11-06/10, against the published 0.2.3, 0.2.4, and 0.2.5
-wheels:** every klyd command was exercised, including all six `kl review`
+**Also proven on 2026-11-06/10, against the published 0.2.4 and 0.2.5 wheels:**
+every klyd command was exercised against 0.2.4, including all six `kl review`
 actions, every status export, pin/unpin, and `kl run` with a stub agent. The
+0.2.5 wheel then passed the full demo runbook and a live provider call. The
 0.2.5 suite is 36 tests. The defects listed above were found by that audit and
 fixed in 0.2.4 and 0.2.5.
 
