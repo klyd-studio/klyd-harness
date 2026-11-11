@@ -55,6 +55,10 @@ kl config --show               # key is masked
 # openrouter/free is the demo default: it needs no credit and the extraction
 # prompt does not depend on a specific model. If your key has credit, swap in
 # the model you intend to film, e.g. anthropic/claude-sonnet-4-6.
+# Free routers can take minutes. The default request timeout is 90s; for a
+# live free-tier run, raise it in the shell that runs git commit (the hook
+# inherits the environment):
+export KLYD_HTTP_TIMEOUT=300
 
 # 4. a commit with an architectural decision in it
 mkdir -p worker/src/lib
